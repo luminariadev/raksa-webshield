@@ -5,6 +5,18 @@ All notable changes to `raksa-webshield` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-26
+
+### Added
+- **Standalone Reverse-Proxy WAF Sidecar (`raksa-webshield proxy`, `internal/proxy/`)**:
+  - Single-binary HTTP reverse proxy wrapping any upstream service with `strict`/`balanced` security header injection, `Server`/`X-Powered-By` stripping, sensitive request inspection, opaque `403` JSON responses, bounded-LRU per-IP rate limiting (`WEB-312`, HTTP `429` + `Retry-After`), Raksa Schema v1 NDJSON SIEM telemetry logs (`--log-file`), and Prometheus `/metrics` + `/healthz` (`--metrics-addr`).
+- **Zero-CGO Semantic SQLi & XSS Tokenizers (Go + TypeScript)**:
+  - Added deterministic SQL lexer (`AnalyzeSQLiSemantic` / `analyzeSqlSemantic`) catching syntactic SQL injections (`1' AND 2>1--`, `admin'/**/OR/**/'a'='a`, `1' AND PG_SLEEP(5)--`, `BENCHMARK`, `EXTRACTVALUE`, `1' ORDER BY 10--`, `1; EXEC xp_cmdshell`) with zero prose false positives.
+  - Added stateful HTML5 attribute/tag scanner (`AnalyzeXSSSemantic` / `analyzeXssSemantic`) catching slash-split handlers (`<img/src=x/onerror=alert(1)>`), `<details open ontoggle=...>`, `<meta refresh>`, and tab-obfuscated URIs.
+- **Custom Enterprise YAML WAF Rules Engine (`internal/rules/`, `WEB-311`)**:
+  - Added `examples/custom-waf-rules.yml`, `--custom-rules` CLI support on `inspect-request` and `proxy`, `customRules` support in `@raksa/webshield` (`0.3.0`) Node and Web Fetch middlewares, and the 8th MCP tool `webshield_validate_custom_rules` for dry-run validation.
+- **30-Rule Catalog**: Expanded built-in OWASP ASVS & MITRE D3FEND rule catalog from 28 to 30 rules (`WEB-311`, `WEB-312`).
+
 ## [0.2.0] - 2026-11-26
 
 ### Added

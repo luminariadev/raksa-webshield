@@ -86,11 +86,12 @@ jobs:
           CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/raksa-webshield ./cmd/raksa-webshield
           ./bin/raksa-webshield version
           ./bin/raksa-webshield rules --format json > rules.json
+          ./bin/raksa-webshield proxy --help > /dev/null 2>&1 || true
           ./bin/raksa-webshield generate-policy --target nginx --profile strict > generated.nginx.conf
           ./bin/raksa-webshield audit-config --path generated.nginx.conf --fail-on low
           ./bin/raksa-webshield audit-headers --file testdata/headers_hardened.http --fail-on low
           ./bin/raksa-webshield audit-config --path testdata/nginx_hardened.conf --fail-on low
-          ./bin/raksa-webshield inspect-request --file testdata/payload_benign.json --fail-on low
+          ./bin/raksa-webshield inspect-request --file testdata/payload_benign.json --custom-rules examples/custom-waf-rules.yml --fail-on low
 
           set +e
           ./bin/raksa-webshield audit-headers --file testdata/headers_insecure.http --format sarif --fail-on critical > web.sarif
@@ -103,6 +104,8 @@ jobs:
           waf_rc=$?
           ./bin/raksa-webshield inspect-request --file testdata/payload_advanced.json --fail-on critical
           adv_rc=$?
+          ./bin/raksa-webshield inspect-request --input "{ __schema { types { name } } }" --custom-rules examples/custom-waf-rules.yml --fail-on medium
+          cr_rc=$?
           set -e
 
           test "$hdr_rc" -eq 2
@@ -110,6 +113,7 @@ jobs:
           test "$caddy_rc" -eq 2
           test "$waf_rc" -eq 2
           test "$adv_rc" -eq 2
+          test "$cr_rc" -eq 2
 
       - name: Build and smoke-test distroless Docker image
         run: |

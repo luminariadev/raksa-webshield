@@ -1,24 +1,24 @@
 # raksa-webshield Architecture
 
-`raksa-webshield` is the Layer 3 (`web-defense`) component of the Raksa security suite. It combines a single static Go CLI and MCP server with a zero-dependency TypeScript runtime middleware SDK (`@raksa/webshield`) so engineering teams can enforce HTTP hardening, reverse-proxy posture checks, and defensive input sanitization from CI/CD pipelines straight into production Node, Express, Next.js, Hono, Workers, Bun, and Deno services.
+`raksa-webshield` is the Layer 3 (`web-defense`) component of the Raksa security suite. It combines a static Go CLI, standalone reverse-proxy WAF sidecar, and stdio MCP server with a zero-dependency TypeScript runtime middleware SDK (`@raksa/webshield`) so engineering teams can enforce HTTP hardening, semantic injection defense, custom enterprise policies, and SIEM telemetry across both CI/CD pipelines and live production traffic.
 
 ## Component Flow
 
 ```text
-  [ Go CLI & stdio MCP (raksa-webshield) ]         [ TypeScript SDK (@raksa/webshield) ]
+  [ Go CLI, Reverse-Proxy Sidecar & MCP ]         [ TypeScript SDK (@raksa/webshield) ]
      |         |            |           |             |             |             |
      v         v            v           v             v             v             v
   +------+  +------+   +--------+  +--------+   +-----------+  +---------+  +-----------+
-  |Headers| | CSP  |   |AST Proxy| |10-Class|   | sanitize  |  | header  |  | Node/Fetch|
-  |COOP/  | |Bypass|   |Nginx/   | |WAF &   |   | Html/Href |  | & Nonce |  | WAF + LRU |
-  |Cookies| |Eval  |   |Caddy/K8s| |Scoring |   | Stack Bal |  | builder |  | RateLimit |
+  |Headers| | CSP  |   |AST Proxy| |WAF +   |   | sanitize  |  | header  |  | Node/Fetch|
+  |COOP/  | |Bypass|   |Nginx/   | |Semantic|   | Html/Href |  | & Nonce |  | Semantic  |
+  |Cookies| |Eval  |   |Caddy/K8s| |+ Custom|   | Stack Bal |  | builder |  | + Custom  |
   +---+---+ +--+---+   +---+----+  +---+----+   +-----------+  +---------+  +-----+-----+
       |        |           |           |                                          |
       +--------+-----------+-----------+------------------------------------------+
                            |
                            v
                +------------------------+
-               |   Policy Filter        | (.webshield.yml + expires_on)
+               |   Policy / Sidecar     | (.webshield.yml / proxy /metrics & NDJSON)
                +-----------+------------+
                            |
                            v
@@ -32,20 +32,22 @@
 
 ## Module Responsibilities
 
-- `cmd/raksa-webshield/`: CLI entrypoint (`audit-headers`, `audit-csp`, `audit-config`, `inspect-request`, `audit-workspace`, `generate-policy`, `rules`, `mcp`, `version`) with CI exit codes (`0` clean, `1` CLI/runtime error, `2` findings >= `--fail-on`).
-- `internal/schema/`: Canonical Raksa Finding Schema v1 (`Report`, `PostureScore`, `Finding`, `Severity`, `Summary`), posture grading (`0-100`, `A+`..`F`), and built-in `RuleCatalog()` covering 28 `WEB-*` rules mapped to OWASP ASVS and MITRE D3FEND.
+- `cmd/raksa-webshield/`: CLI entrypoint (`audit-headers`, `audit-csp`, `audit-config`, `inspect-request`, `audit-workspace`, `generate-policy`, `proxy`, `rules`, `mcp`, `version`) with CI exit codes (`0` clean, `1` CLI/runtime error, `2` findings >= `--fail-on`).
+- `internal/schema/`: Canonical Raksa Finding Schema v1 (`Report`, `PostureScore`, `Finding`, `Severity`, `Summary`), posture grading (`0-100`, `A+`..`F`), and built-in `RuleCatalog()` covering 30 `WEB-*` rules mapped to OWASP ASVS and MITRE D3FEND.
 - `internal/policy/`: YAML/JSON suppression policy engine requiring audit reasons and enforcing fail-closed `expires_on` (`YYYY-MM-DD`) expiration dates.
+- `internal/rules/`: Enterprise custom YAML WAF rules engine (`LoadCustomRules`, `ParseCustomRules`, `Evaluate`) supporting `contains`, `regex`, and `exact` matching, target scoping, `block`/`monitor` actions, and emitting `WEB-311`.
+- `internal/proxy/`: Standalone Go HTTP reverse-proxy sidecar wrapping `httputil.NewSingleHostReverseProxy` with hardened response header injection, banner stripping (`Server`/`X-Powered-By`), thread-safe bounded-LRU per-IP rate limiting (`WEB-312`, HTTP `429` + `Retry-After`), opaque `403` JSON responses, **Raksa Schema v1 NDJSON** telemetry logs, and Prometheus **`/metrics`** exposition.
 - `internal/auditor/`:
-  - `headers.go` / `csp.go` / `cors.go` / `cookies.go`: Raw HTTP header parser and analyzers for HSTS, CSP directives + JSONP/CDN bypass host detection (`WEB-006`), `strict-dynamic`/nonce handling, COOP/CORP & cookie `Cache-Control: no-store` (`WEB-007`), clickjacking, CORS origin/credential leaks, and smart session vs CSRF cookie checks (`WEB-001`..`WEB-104`).
-  - `config.go`: Block-aware Nginx AST scope parser (`WEB-205` `add_header` inheritance drop, `WEB-206` off-by-slash `alias` traversal / dynamic `proxy_pass` / `$http_host` forwarding, `WEB-207` weak `ssl_ciphers`), real Caddyfile rules, `vercel.json`, `_headers`, and Kubernetes Ingress YAML auditing (`WEB-201`..`WEB-207`) plus recursive `AuditWorkspace`.
-  - `live.go`: Read-only live HTTP/HTTPS header + TLS protocol/certificate expiration inspector (`inspectTLSState`) with private/loopback/metadata SSRF blocking by default.
-  - `waf.go`: High-speed 10-class anomaly-scoring payload inspector (`WEB-301`..`WEB-310`) with multi-layer URI, HTML entity, `\u00XX`, and SQL inline-comment normalization, paranoia levels `1-3`, and ASCII fast-path prefilters.
-  - `remediate.go`: Self-auditing configuration generator producing hardened `nginx`, `caddy`, `nextjs`, and `headers` snippets (`strict` and `balanced` profiles).
-- `internal/report/`: ANSI-sanitized table (showing score/grade), JSON Schema v1, and SARIF 2.1.0 serializers.
-- `internal/mcp/`: Line-bounded `stdio` JSON-RPC 2.0 MCP server exposing 7 defensive `webshield_*` tools including `webshield_generate_remediation`.
-- `sdk/ts/`: Zero-dependency TypeScript package (`@raksa/webshield`) exporting tag-stack balanced `sanitizeHtml`, `escapeHtml`, `isSafeUrl`, `generateCspNonce`, `buildSecurityHeaders`, `createMemoryRateLimiter`, `inspectInput`, `createWebShieldMiddleware` (opaque `incident_id` 403 by default), and Web Standard `createFetchWebShield`.
+  - `headers.go` / `csp.go` / `cors.go` / `cookies.go`: Raw HTTP header parser and analyzers (`WEB-001`..`WEB-104`).
+  - `config.go`: Block-aware Nginx AST, Caddyfile, `vercel.json`, `_headers`, and Kubernetes Ingress YAML auditor (`WEB-201`..`WEB-207`) plus recursive `AuditWorkspace`.
+  - `live.go`: Read-only live HTTP/HTTPS header and TLS protocol/certificate expiration inspector (`inspectTLSState`) with private/loopback/metadata SSRF blocking by default.
+  - `waf.go` & `semantic.go`: High-speed 10-class WAF + zero-CGO deterministic SQLi token fingerprinter (`AnalyzeSQLiSemantic`) and stateful HTML5 XSS scanner (`AnalyzeXSSSemantic`) (`WEB-301`..`WEB-310`).
+  - `remediate.go`: Self-auditing configuration generator for `nginx`, `caddy`, `nextjs`, and `headers`.
+- `internal/report/`: ANSI-sanitized table (with score/grade), JSON Schema v1, and SARIF 2.1.0 serializers.
+- `internal/mcp/`: Line-bounded `stdio` JSON-RPC 2.0 MCP server exposing 8 defensive `webshield_*` tools including `webshield_generate_remediation` and `webshield_validate_custom_rules`.
+- `sdk/ts/`: Zero-dependency TypeScript package (`@raksa/webshield`) exporting `sanitizeHtml`, `escapeHtml`, `isSafeUrl`, `generateCspNonce`, `buildSecurityHeaders`, `createMemoryRateLimiter`, `analyzeSqlSemantic`, `analyzeXssSemantic`, `inspectInput`, `createWebShieldMiddleware`, and `createFetchWebShield`.
 
-## Rule Catalog Overview (28 Rules)
+## Rule Catalog Overview (30 Rules)
 
 | Rule ID | Module | Control | OWASP ASVS | MITRE D3FEND |
 | :--- | :--- | :--- | :--- | :--- |
@@ -67,8 +69,8 @@
 | `WEB-205` | `config` | Nginx `location` `add_header` drops parent security headers | 14.4.3 | `D3-CH` |
 | `WEB-206` | `config` | Nginx `alias` off-by-slash traversal or dynamic `proxy_pass`/`$http_host` | 12.3.1 | `D3-CH` |
 | `WEB-207` | `config` | Weak TLS cipher suite, expiring certificate, or insecure web config | 9.1.3 | `D3-CH` |
-| `WEB-301` | `waf` | Cross-Site Scripting (XSS) payload pattern | 5.3.3 | `D3-IV` |
-| `WEB-302` | `waf` | SQL Injection (SQLi) payload pattern | 5.3.4 | `D3-IV` |
+| `WEB-301` | `waf` | Cross-Site Scripting (XSS) payload or semantic vector | 5.3.3 | `D3-IV` |
+| `WEB-302` | `waf` | SQL Injection (SQLi) payload or semantic AST pattern | 5.3.4 | `D3-IV` |
 | `WEB-303` | `waf` | Path Traversal / LFI sequence | 12.3.1 | `D3-IV` |
 | `WEB-304` | `waf` | Prototype Pollution key pattern | 5.1.3 | `D3-IV` |
 | `WEB-305` | `waf` | SSRF or cloud metadata URI target | 12.6.1 | `D3-NI` |
@@ -77,3 +79,5 @@
 | `WEB-308` | `waf` | NoSQL operator injection pattern | 5.3.5 | `D3-IV` |
 | `WEB-309` | `waf` | XML External Entity (XXE) DOCTYPE/ENTITY pattern | 5.5.2 | `D3-IV` |
 | `WEB-310` | `waf` | HTTP Response Splitting / CRLF header injection | 5.3.10 | `D3-IV` |
+| `WEB-311` | `waf` | Custom enterprise YAML WAF policy rule matched | 5.1.3 | `D3-IV` |
+| `WEB-312` | `waf` | HTTP request rate limit exceeded in WebShield proxy | 13.1.4 | `D3-NI` |
