@@ -7,6 +7,7 @@ import {
   createMemoryRateLimiter,
   type RateLimiterOptions,
 } from "./ratelimit.js";
+import { analyzeSqlSemantic, analyzeXssSemantic } from "./semantic.js";
 
 export type Severity = "info" | "low" | "medium" | "high" | "critical";
 
@@ -49,9 +50,22 @@ export interface RaksaReport {
   findings: RaksaFinding[];
 }
 
+export interface CustomWafRule {
+  id: string;
+  title: string;
+  severity?: Severity;
+  weight?: number;
+  matchType: "contains" | "regex" | "exact";
+  pattern: string | RegExp;
+  caseInsensitive?: boolean;
+  action?: "block" | "monitor";
+  remediation?: string;
+}
+
 export interface InspectOptions {
   paranoiaLevel?: number;
   anomalyThreshold?: number;
+  customRules?: readonly CustomWafRule[];
 }
 
 export interface WebShieldRequestLike {
@@ -83,6 +97,7 @@ export interface MiddlewareOptions {
   maxInspectBytes?: number;
   paranoiaLevel?: number;
   anomalyThreshold?: number;
+  customRules?: readonly CustomWafRule[];
   excludePaths?: readonly (string | RegExp)[];
   exposeReportInResponse?: boolean;
   rateLimit?: RateLimiterOptions;
@@ -307,20 +322,63 @@ export function inspectInput(
 
   for (const rule of WAF_RULES) {
     let matchedSample = "";
+    let detector: "regex" | "semantic" = "regex";
+    let semanticTag = "";
+
     for (let idx = 0; idx < views.length; idx++) {
       const low = lowViews[idx] ?? "";
       const view = views[idx] ?? "";
       if (!rule.prefilter(low)) {
         continue;
       }
-      const m = rule.pattern.exec(view) ?? (paranoia >= 2 && rule.pl2Pattern ? rule.pl2Pattern.exec(view) : null);
+      const m =
+        rule.pattern.exec(view) ??
+        (paranoia >= 2 && rule.pl2Pattern ? rule.pl2Pattern.exec(view) : null);
       if (m && m[0]) {
         matchedSample = m[0];
         break;
       }
     }
+
+    if (matchedSample === "" && rule.ruleId === "WEB-301") {
+      for (const view of views) {
+        const sem = analyzeXssSemantic(view);
+        if (sem.matched && sem.sample) {
+          matchedSample = sem.sample;
+          detector = "semantic";
+          semanticTag = sem.vector ?? "";
+          break;
+        }
+      }
+    }
+    if (matchedSample === "" && rule.ruleId === "WEB-302") {
+      for (const view of views) {
+        const sem = analyzeSqlSemantic(view);
+        if (sem.matched && sem.sample) {
+          matchedSample = sem.sample;
+          detector = "semantic";
+          semanticTag = sem.fingerprint ?? "";
+          break;
+        }
+      }
+    }
+
     if (matchedSample !== "") {
       totalScore += rule.weight;
+      const evidence: Record<string, unknown> = {
+        matched_sample: matchedSample.slice(0, 80),
+        detector,
+        anomaly_score: rule.weight,
+        paranoia_level: paranoia,
+        owasp_asvs: rule.asvs,
+      };
+      if (semanticTag !== "") {
+        if (rule.ruleId === "WEB-302") {
+          evidence.sql_fingerprint = semanticTag;
+        } else {
+          evidence.xss_vector = semanticTag;
+        }
+      }
       findings.push({
         id: `${rule.ruleId.toLowerCase()}-payload`,
         rule_id: rule.ruleId,
@@ -330,14 +388,44 @@ export function inspectInput(
         title: rule.title,
         description: rule.description,
         target,
-        evidence: {
-          matched_sample: matchedSample.slice(0, 80),
-          anomaly_score: rule.weight,
-          paranoia_level: paranoia,
-          owasp_asvs: rule.asvs,
-        },
+        evidence,
         remediation: rule.remediation,
         mitre_d3fend: rule.d3fend,
+        timestamp: now,
+      });
+    }
+  }
+
+  if (options.customRules && options.customRules.length > 0) {
+    const inputLow = lowViews[0] ?? input.toLowerCase();
+    for (const cr of options.customRules) {
+      const matched = matchCustomRule(input, inputLow, cr);
+      if (!matched) continue;
+      const sev = cr.severity ?? "high";
+      const weight =
+        cr.weight && cr.weight > 0 ? cr.weight : defaultWeightForSeverity(sev);
+      const action = cr.action ?? "block";
+      totalScore += weight;
+      findings.push({
+        id: `web-311-${cr.id.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}`,
+        rule_id: "WEB-311",
+        module: "waf",
+        layer: "web-defense",
+        severity: sev,
+        title: cr.title || `Custom enterprise WAF rule ${cr.id} matched`,
+        description: `Payload matched custom WAF rule ${cr.id} (${cr.matchType}).`,
+        target,
+        evidence: {
+          custom_rule_id: cr.id,
+          action,
+          matched_sample: matched.slice(0, 80),
+          anomaly_score: weight,
+          owasp_asvs: "5.1.3",
+        },
+        remediation:
+          cr.remediation ??
+          `Review traffic matching custom WAF rule ${cr.id} and apply targeted policy remediation.`,
+        mitre_d3fend: "D3-IV",
         timestamp: now,
       });
     }
@@ -355,6 +443,59 @@ export function inspectInput(
     }
   }
   return findings;
+}
+
+export function findingsRequireBlock(findings: readonly RaksaFinding[]): boolean {
+  for (const f of findings) {
+    if (f.evidence?.action !== "monitor") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function matchCustomRule(
+  raw: string,
+  rawLow: string,
+  rule: CustomWafRule,
+): string {
+  const ci = rule.caseInsensitive ?? false;
+  if (rule.matchType === "regex") {
+    const src =
+      rule.pattern instanceof RegExp
+        ? rule.pattern
+        : new RegExp(rule.pattern, ci ? "i" : "");
+    const safeFlags = src.flags.replace(/[gy]/g, "") + (ci && !src.flags.includes("i") ? "i" : "");
+    const re = new RegExp(src.source, safeFlags);
+    const m = re.exec(raw);
+    return m?.[0] ?? "";
+  }
+  const pat = typeof rule.pattern === "string" ? rule.pattern : rule.pattern.source;
+  if (rule.matchType === "exact") {
+    if (ci) {
+      return rawLow === pat.toLowerCase() ? raw : "";
+    }
+    return raw === pat ? raw : "";
+  }
+  if (ci) {
+    return rawLow.includes(pat.toLowerCase()) ? pat : "";
+  }
+  return raw.includes(pat) ? pat : "";
+}
+
+function defaultWeightForSeverity(sev: Severity): number {
+  switch (sev) {
+    case "critical":
+      return 5;
+    case "high":
+      return 4;
+    case "medium":
+      return 3;
+    case "low":
+      return 2;
+    default:
+      return 1;
+  }
 }
 
 export function computePostureScore(findings: readonly RaksaFinding[]): RaksaPostureScore {
@@ -598,12 +739,13 @@ export function createWebShieldMiddleware(options: MiddlewareOptions = {}) {
     const findings = inspectInput(combined, target, {
       paranoiaLevel,
       anomalyThreshold,
+      customRules: options.customRules,
     });
     if (findings.length > 0) {
       const report = buildRaksaReport(findings);
       const incidentId = createIncidentId();
       options.onReport?.(report, req, incidentId);
-      if (mode === "enforce") {
+      if (mode === "enforce" && findingsRequireBlock(findings)) {
         res.statusCode = 403;
         res.setHeader("Content-Type", "application/json; charset=utf-8");
         const body: Record<string, unknown> = {

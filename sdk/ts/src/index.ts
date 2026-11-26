@@ -1,4 +1,4 @@
-export const SDK_VERSION = "0.2.0";
+export const SDK_VERSION = "0.3.0";
 
 export {
   decodeHtmlEntities,
@@ -22,10 +22,19 @@ export {
 } from "./ratelimit.js";
 
 export {
+  analyzeSqlSemantic,
+  analyzeXssSemantic,
+  type SemanticSqlResult,
+  type SemanticXssResult,
+} from "./semantic.js";
+
+export {
   buildRaksaReport,
   computePostureScore,
   createWebShieldMiddleware,
+  findingsRequireBlock,
   inspectInput,
+  type CustomWafRule,
   type InspectOptions,
   type MiddlewareOptions,
   type NextCallback,

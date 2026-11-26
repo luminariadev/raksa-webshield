@@ -25,7 +25,7 @@ type sqlTok struct {
 }
 
 var sqlSemanticKeywords = map[string]struct{}{
-	"union": {}, "select": {}, "from": {}, "where": {},
+	"union": {}, "all": {}, "select": {}, "from": {}, "where": {},
 	"or": {}, "and": {}, "having": {}, "order": {}, "group": {}, "by": {},
 	"insert": {}, "into": {}, "values": {}, "update": {}, "set": {},
 	"delete": {}, "drop": {}, "alter": {}, "create": {},
@@ -119,7 +119,7 @@ func hasAnyBoundedKeyword(low string) bool {
 			}
 			word := low[start:i]
 			if _, ok := sqlSemanticKeywords[word]; ok {
-				if word != "from" && word != "in" && word != "set" && word != "not" && word != "null" && word != "by" {
+				if word != "all" && word != "from" && word != "in" && word != "set" && word != "not" && word != "null" && word != "by" {
 					return true
 				}
 			}
@@ -450,6 +450,9 @@ func scanTagAttributesForXSS(tagName string, attrs string) (string, string) {
 			} else {
 				vStart := i
 				for i < n && attrs[i] > ' ' && attrs[i] != '>' {
+					if attrs[i] == '/' && !strings.Contains(attrs[vStart:i], "://") && looksLikeAttrAssign(attrs, i+1) {
+						break
+					}
 					i++
 				}
 				attrVal = attrs[vStart:i]
@@ -475,6 +478,17 @@ func scanTagAttributesForXSS(tagName string, attrs string) (string, string) {
 		}
 	}
 	return "", ""
+}
+
+func looksLikeAttrAssign(s string, start int) bool {
+	i := start
+	if i >= len(s) || !isASCIIAlpha(s[i]) {
+		return false
+	}
+	for i < len(s) && (isASCIIAlpha(s[i]) || s[i] == '-') {
+		i++
+	}
+	return i < len(s) && s[i] == '='
 }
 
 func stripControlCharsLower(s string) string {

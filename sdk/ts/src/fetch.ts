@@ -10,8 +10,10 @@ import {
 import {
   buildRaksaReport,
   createIncidentId,
+  findingsRequireBlock,
   inspectInput,
   isExcludedPath,
+  type CustomWafRule,
   type RaksaReport,
 } from "./waf.js";
 
@@ -23,6 +25,7 @@ export interface FetchShieldOptions {
   maxInspectBytes?: number;
   paranoiaLevel?: number;
   anomalyThreshold?: number;
+  customRules?: readonly CustomWafRule[];
   excludePaths?: readonly (string | RegExp)[];
   exposeReportInResponse?: boolean;
   rateLimit?: RateLimiterOptions;
@@ -146,6 +149,7 @@ export function createFetchWebShield(options: FetchShieldOptions = {}) {
     const findings = inspectInput(combined, `http://${method} ${request.url}`, {
       paranoiaLevel,
       anomalyThreshold,
+      customRules: options.customRules,
     });
 
     let report: RaksaReport | undefined;
@@ -154,7 +158,7 @@ export function createFetchWebShield(options: FetchShieldOptions = {}) {
       report = buildRaksaReport(findings);
       incidentId = createIncidentId();
       options.onReport?.(report, request, incidentId);
-      if (mode === "enforce") {
+      if (mode === "enforce" && findingsRequireBlock(findings)) {
         const payload: Record<string, unknown> = {
           error: "Request blocked by raksa-webshield defensive policy",
           incident_id: incidentId,

@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  analyzeSqlSemantic,
+  analyzeXssSemantic,
   buildSecurityHeaders,
   createFetchWebShield,
   createMemoryRateLimiter,
@@ -12,12 +14,13 @@ import {
   isSafeUrl,
   sanitizeHtml,
   SDK_VERSION,
+  type CustomWafRule,
   type RaksaReport,
   type WebShieldResponseLike,
 } from "../dist/index.js";
 
-test("SDK v0.2.0 exports and escapeHtml encodes dangerous characters safely", () => {
-  assert.equal(SDK_VERSION, "0.2.0");
+test("SDK v0.3.0 exports and escapeHtml encodes dangerous characters safely", () => {
+  assert.equal(SDK_VERSION, "0.3.0");
   assert.equal(
     escapeHtml(`<div class="a" data-x='1'>a & b \`c\`</div>`),
     "&lt;div class=&quot;a&quot; data-x=&#39;1&#39;&gt;a &amp; b &#96;c&#96;&lt;/div&gt;",
@@ -302,4 +305,122 @@ test("createFetchWebShield protects Request/Response handlers with nonces, WAF, 
   const blockedJson = (await blockedResp.json()) as Record<string, unknown>;
   assert.match(String(blockedJson.incident_id), /^inc-/);
   assert.equal(blockedJson.report, undefined);
+});
+
+test("v0.3.0 semantic SQLi/XSS tokenizers catch evasive vectors with zero prose false positives", () => {
+  for (const sqli of [
+    `1' AND 2>1--`,
+    `admin'/**/OR/**/'a'='a`,
+    `1) UNION ALL SELECT NULL,NULL--`,
+    `1' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--`,
+    `1' AND BENCHMARK(5000000,MD5(1))--`,
+    `1' AND PG_SLEEP(5)--`,
+    `1' ORDER BY 10--`,
+    `1; EXEC xp_cmdshell`,
+    `1' OR 1 IN (SELECT 1)--`,
+  ]) {
+    assert.equal(analyzeSqlSemantic(sqli).matched, true, `semantic SQLi missed: ${sqli}`);
+    const hits = inspectInput(sqli, "inline://sqli");
+    assert.equal(hits.some((f) => f.rule_id === "WEB-302"), true, `WEB-302 missed: ${sqli}`);
+  }
+
+  for (const xss of [
+    `<img/src=x/onerror=alert(1)>`,
+    `<details open ontoggle=alert(1)>`,
+    `<body/onload=alert(1)>`,
+    `<a href="java\tscript:alert(1)">x</a>`,
+    `<meta http-equiv="refresh" content="0;url=javascript:alert(1)">`,
+    `<form action="javascript:alert(1)"><input></form>`,
+  ]) {
+    assert.equal(analyzeXssSemantic(xss).matched, true, `semantic XSS missed: ${xss}`);
+    const hits = inspectInput(xss, "inline://xss");
+    assert.equal(hits.some((f) => f.rule_id === "WEB-301"), true, `WEB-301 missed: ${xss}`);
+  }
+
+  for (const benign of [
+    `{"comment":"Hello world 1+1=2","path":"/docs/security","author":"alice"}`,
+    `Please select a book from our catalog and order by popularity`,
+    `Please use SELECT item_id FROM menu style descriptions in prose only.`,
+    `alice or bob`,
+  ]) {
+    assert.equal(analyzeSqlSemantic(benign).matched, false, `SQLi FP on: ${benign}`);
+    assert.equal(analyzeXssSemantic(benign).matched, false, `XSS FP on: ${benign}`);
+    assert.equal(inspectInput(benign, "inline://benign").length, 0, `inspectInput FP on: ${benign}`);
+  }
+});
+
+test("v0.3.0 customRules enforce block vs monitor actions in Node and Fetch middlewares", async () => {
+  const customRules: CustomWafRule[] = [
+    {
+      id: "CUSTOM-GQL",
+      title: "Block GraphQL introspection",
+      severity: "medium",
+      matchType: "regex",
+      pattern: "__schema\\b",
+      caseInsensitive: true,
+      action: "block",
+    },
+    {
+      id: "CUSTOM-LEGACY-HEADER",
+      title: "Monitor deprecated auth query param",
+      severity: "low",
+      matchType: "contains",
+      pattern: "legacy_token=",
+      action: "monitor",
+    },
+  ];
+
+  let nodeReports = 0;
+  const mw = createWebShieldMiddleware({
+    mode: "enforce",
+    customRules,
+    onReport() {
+      nodeReports += 1;
+    },
+  });
+
+  const mkRes = () => {
+    const headers: Record<string, string> = {};
+    return {
+      statusCode: 200,
+      headers,
+      endedBody: "",
+      setHeader(name: string, value: string) {
+        headers[name] = value;
+      },
+      end(chunk?: string) {
+        this.endedBody = chunk ?? "";
+      },
+    } satisfies WebShieldResponseLike & { headers: Record<string, string>; endedBody: string };
+  };
+
+  // Monitor custom rule allows request through while reporting telemetry.
+  const resMon = mkRes();
+  let monNext = false;
+  mw({ method: "GET", url: "/api/items?legacy_token=abc123" }, resMon, () => {
+    monNext = true;
+  });
+  assert.equal(monNext, true);
+  assert.equal(nodeReports, 1);
+
+  // Block custom rule returns opaque 403.
+  const resBlk = mkRes();
+  let blkNext = false;
+  mw({ method: "POST", url: "/graphql", body: { query: "{ __schema { types { name } } }" } }, resBlk, () => {
+    blkNext = true;
+  });
+  assert.equal(blkNext, false);
+  assert.equal(resBlk.statusCode, 403);
+  assert.equal(nodeReports, 2);
+
+  // Fetch adapter enforces block rule identically.
+  const fetchShield = createFetchWebShield({ mode: "enforce", customRules });
+  const blockedFetch = await fetchShield(
+    new Request("https://app.example.org/graphql", {
+      method: "POST",
+      body: "{ __schema { queryType { name } } }",
+    }),
+    () => new Response("ok"),
+  );
+  assert.equal(blockedFetch.status, 403);
 });
