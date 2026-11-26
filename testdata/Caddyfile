@@ -1,0 +1,12 @@
+{
+    auto_https off
+}
+
+example.org {
+    tls {
+        protocols tls1.1 tls1.3
+        ciphers TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA
+    }
+    file_server browse
+    header Access-Control-Allow-Origin *
+}
