@@ -1,0 +1,8 @@
+bin/
+dist/
+*.exe
+*.sarif
+coverage/
+sdk/ts/node_modules/
+sdk/ts/dist/
+.DS_Store

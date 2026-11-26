@@ -1,0 +1,27 @@
+{
+  "name": "@raksa/webshield",
+  "version": "0.1.0",
+  "description": "Zero-dependency TypeScript anti-XSS HTML sanitizer, security header builder, and defensive mini-WAF middleware (Raksa Layer 3)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "npm run build && node --test tests/*.test.ts",
+    "bench": "npm run build && node bench/throughput.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
