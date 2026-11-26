@@ -42,14 +42,27 @@ func AuditCSP(policyStr string, target string) []schema.Finding {
 	directives := ParseCSP(policyStr)
 	var findings []schema.Finding
 
-	scriptDir := "script-src"
-	scriptVals, hasScript := directives["script-src"]
+	scriptDir := "script-src-elem"
+	scriptVals, hasScript := directives["script-src-elem"]
+	if !hasScript {
+		scriptDir = "script-src"
+		scriptVals, hasScript = directives["script-src"]
+	}
 	if !hasScript {
 		scriptDir = "default-src"
 		scriptVals = directives["default-src"]
 	}
 
 	unsafeTokens := findUnsafeCSPSources(scriptVals)
+	if scriptDir == "script-src-elem" {
+		if fallbackScript, ok := directives["script-src"]; ok {
+			for _, tok := range findUnsafeCSPSources(fallbackScript) {
+				if (tok == "'unsafe-eval'" || tok == "'wasm-unsafe-eval'") && !containsToken(unsafeTokens, tok) {
+					unsafeTokens = append(unsafeTokens, tok)
+				}
+			}
+		}
+	}
 	if len(unsafeTokens) > 0 {
 		findings = append(findings, newFinding(
 			"WEB-003", "csp", schema.SeverityHigh,
@@ -61,9 +74,28 @@ func AuditCSP(policyStr string, target string) []schema.Finding {
 				"unsafe_sources": unsafeTokens,
 				"owasp_asvs":     "14.4.3",
 			},
-			"Remove 'unsafe-inline', 'unsafe-eval', wildcard *, data:, and insecure http: origins from script-src; use nonces or SHA-256 hashes.",
+			"Remove 'unsafe-inline', 'unsafe-eval', wildcard *, data:, blob:, and insecure http: origins from script-src; use nonces or SHA-256 hashes.",
 			"D3-HI", "unsafe-"+scriptDir, now,
 		))
+	}
+
+	if !containsToken(scriptVals, "'strict-dynamic'") {
+		bypassHosts := findCSPBypassHosts(scriptVals)
+		if len(bypassHosts) > 0 {
+			findings = append(findings, newFinding(
+				"WEB-006", "csp", schema.SeverityMedium,
+				"CSP permits known JSONP/CDN bypass hosts",
+				fmt.Sprintf("CSP %s allows hosts known to host JSONP/gadget bypasses without 'strict-dynamic' (%s).", scriptDir, strings.Join(bypassHosts, ", ")),
+				target,
+				map[string]any{
+					"directive":    scriptDir,
+					"bypass_hosts": bypassHosts,
+					"owasp_asvs":   "14.4.3",
+				},
+				"Adopt nonces or SHA-256 hashes paired with 'strict-dynamic', or replace broad public CDN hosts with vetted self-hosted bundles.",
+				"D3-HI", "csp-bypass-hosts", now,
+			))
+		}
 	}
 
 	if hasScript {
@@ -122,18 +154,108 @@ func AuditCSP(policyStr string, target string) []schema.Finding {
 		))
 	}
 
+	if _, hasForm := directives["form-action"]; !hasForm {
+		findings = append(findings, newFinding(
+			"WEB-006", "csp", schema.SeverityMedium,
+			"CSP missing form-action restriction",
+			"CSP omits form-action, allowing injected or dangling HTML forms to exfiltrate credentials to external origins.",
+			target,
+			map[string]any{"directive": "form-action", "owasp_asvs": "14.4.3"},
+			"Add form-action 'self' (or explicit trusted submission endpoints) to Content-Security-Policy.",
+			"D3-HI", "missing-form-action", now,
+		))
+	}
+
 	return findings
+}
+
+var knownBypassHosts = []string{
+	"ajax.googleapis.com",
+	"googleapis.com",
+	"cdnjs.cloudflare.com",
+	"cdn.jsdelivr.net",
+	"unpkg.com",
+	"raw.githubusercontent.com",
+	"accounts.google.com",
+	"gstatic.com",
+	"cloudfront.net",
+}
+
+func hasNonceOrHash(tokens []string) bool {
+	for _, tok := range tokens {
+		if strings.HasSuffix(tok, "'") && (strings.HasPrefix(tok, "'nonce-") ||
+			strings.HasPrefix(tok, "'sha256-") ||
+			strings.HasPrefix(tok, "'sha384-") ||
+			strings.HasPrefix(tok, "'sha512-")) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractCSPHost(token string) string {
+	t := strings.TrimSpace(strings.ToLower(token))
+	if t == "" || strings.HasPrefix(t, "'") {
+		return ""
+	}
+	if strings.HasPrefix(t, "https://") {
+		t = strings.TrimPrefix(t, "https://")
+	} else if strings.HasPrefix(t, "http://") {
+		t = strings.TrimPrefix(t, "http://")
+	} else if strings.HasPrefix(t, "//") {
+		t = strings.TrimPrefix(t, "//")
+	} else if strings.Contains(t, ":") && !strings.Contains(t, "/") {
+		// Ignore schemes like data:, blob:, filesystem:
+		if strings.HasSuffix(t, ":") {
+			return ""
+		}
+	}
+	if slash := strings.IndexByte(t, '/'); slash >= 0 {
+		t = t[:slash]
+	}
+	if colon := strings.IndexByte(t, ':'); colon >= 0 {
+		t = t[:colon]
+	}
+	t = strings.TrimPrefix(t, "*.")
+	return strings.TrimSuffix(t, ".")
+}
+
+func findCSPBypassHosts(tokens []string) []string {
+	var hits []string
+	seen := make(map[string]struct{})
+	for _, tok := range tokens {
+		host := extractCSPHost(tok)
+		if host == "" {
+			continue
+		}
+		for _, bad := range knownBypassHosts {
+			if host == bad || strings.HasSuffix(host, "."+bad) {
+				if _, ok := seen[host]; !ok {
+					seen[host] = struct{}{}
+					hits = append(hits, host)
+				}
+				break
+			}
+		}
+	}
+	return hits
 }
 
 func findUnsafeCSPSources(tokens []string) []string {
 	var unsafe []string
 	seen := make(map[string]struct{})
+	ignoreUnsafeInline := hasNonceOrHash(tokens)
 	for _, tok := range tokens {
+		if tok == "'unsafe-inline'" && ignoreUnsafeInline {
+			continue
+		}
 		isRisky := tok == "'unsafe-inline'" ||
 			tok == "'unsafe-eval'" ||
 			tok == "'wasm-unsafe-eval'" ||
 			tok == "*" ||
 			tok == "data:" ||
+			tok == "blob:" ||
+			tok == "filesystem:" ||
 			strings.HasPrefix(tok, "http:") ||
 			strings.HasPrefix(tok, "*.")
 		if isRisky {

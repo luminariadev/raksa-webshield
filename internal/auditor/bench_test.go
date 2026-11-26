@@ -4,15 +4,18 @@ import "testing"
 
 const benchRawHeaders = `HTTP/1.1 200 OK
 Strict-Transport-Security: max-age=31536000; includeSubDomains
-Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
 X-Frame-Options: DENY
 X-Content-Type-Options: nosniff
 Referrer-Policy: strict-origin-when-cross-origin
 Permissions-Policy: geolocation=(), microphone=(), camera=()
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Resource-Policy: same-origin
+Cache-Control: no-store
 Set-Cookie: __Host-sid=redacted; Secure; HttpOnly; SameSite=Strict; Path=/
 `
 
-const benchCSP = "default-src 'self'; script-src 'self' https://cdn.example.org; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+const benchCSP = "default-src 'self'; script-src 'self' https://cdn.example.org; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
 const benchNginxConf = `server {
     listen 443 ssl http2;

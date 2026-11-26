@@ -54,12 +54,13 @@ func AuditCookies(hdr http.Header, target string) []schema.Finding {
 		}
 
 		// WEB-103: Missing Secure or HttpOnly (cookie values are redacted from findings).
-		if !hasSecure || !hasHTTPOnly {
+		requireHTTPOnly := !isClientReadableNonSessionCookie(cookieName)
+		if !hasSecure || (requireHTTPOnly && !hasHTTPOnly) {
 			var missing []string
 			if !hasSecure {
 				missing = append(missing, "Secure")
 			}
-			if !hasHTTPOnly {
+			if requireHTTPOnly && !hasHTTPOnly {
 				missing = append(missing, "HttpOnly")
 			}
 			findings = append(findings, newFinding(
@@ -72,7 +73,7 @@ func AuditCookies(hdr http.Header, target string) []schema.Finding {
 					"missing_attributes": missing,
 					"owasp_asvs":         "3.4.1 / 3.4.2",
 				},
-				fmt.Sprintf("Set Secure; HttpOnly on cookie '%s' so it cannot traverse cleartext HTTP or be read by document.cookie.", cookieName),
+				fmt.Sprintf("Set %s on cookie '%s' so it cannot traverse cleartext HTTP or be read by document.cookie.", strings.Join(missing, "; "), cookieName),
 				"D3-HI", "cookie-flags-"+cookieName, now,
 			))
 		}
@@ -130,4 +131,13 @@ func AuditCookies(hdr http.Header, target string) []schema.Finding {
 	}
 
 	return findings
+}
+
+func isClientReadableNonSessionCookie(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "xsrf-token", "csrf-token", "csrftoken", "theme", "lang", "locale", "tz":
+		return true
+	default:
+		return false
+	}
 }

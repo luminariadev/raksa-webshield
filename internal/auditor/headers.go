@@ -201,9 +201,64 @@ func AuditHeadersWithProbe(hdr http.Header, target string, probeOrigin string) [
 		))
 	}
 
+	// WEB-007: Modern Cross-Origin Isolation headers and authenticated Cache-Control
+	coop := strings.ToLower(strings.TrimSpace(hdr.Get("Cross-Origin-Opener-Policy")))
+	if coop != "same-origin" && coop != "same-origin-allow-popups" {
+		findings = append(findings, newFinding(
+			"WEB-007", "headers", schema.SeverityLow,
+			"Missing Cross-Origin-Opener-Policy header",
+			"Response omits Cross-Origin-Opener-Policy: same-origin, leaving browsing context windows exposed to XS-Leaks.",
+			target,
+			map[string]any{"header": "Cross-Origin-Opener-Policy", "observed": hdr.Get("Cross-Origin-Opener-Policy"), "owasp_asvs": "14.4.7"},
+			"Set Cross-Origin-Opener-Policy: same-origin on top-level document responses.",
+			"D3-HI", "missing-coop", now,
+		))
+	}
+
+	corp := strings.ToLower(strings.TrimSpace(hdr.Get("Cross-Origin-Resource-Policy")))
+	if corp != "same-origin" && corp != "same-site" && corp != "cross-origin" {
+		findings = append(findings, newFinding(
+			"WEB-007", "headers", schema.SeverityLow,
+			"Missing Cross-Origin-Resource-Policy header",
+			"Response omits Cross-Origin-Resource-Policy to protect resources from unintended cross-origin reads.",
+			target,
+			map[string]any{"header": "Cross-Origin-Resource-Policy", "observed": hdr.Get("Cross-Origin-Resource-Policy"), "owasp_asvs": "14.4.7"},
+			"Set Cross-Origin-Resource-Policy: same-origin (or same-site) on application responses.",
+			"D3-HI", "missing-corp", now,
+		))
+	}
+
+	if len(hdr.Values("Set-Cookie")) > 0 {
+		cc := hdr.Get("Cache-Control")
+		if !hasCacheControlGuard(cc) {
+			findings = append(findings, newFinding(
+				"WEB-007", "headers", schema.SeverityLow,
+				"Authenticated Set-Cookie response lacks Cache-Control: no-store",
+				"Response issues cookies without Cache-Control: no-store or private, risking shared proxy/browser caching.",
+				target,
+				map[string]any{"header": "Cache-Control", "observed": cc, "owasp_asvs": "8.2.1"},
+				"Set Cache-Control: no-store on responses issuing or mutating session cookies.",
+				"D3-HI", "missing-cache-control-no-store", now,
+			))
+		}
+	}
+
 	findings = append(findings, AuditCORS(hdr, target, probeOrigin)...)
 	findings = append(findings, AuditCookies(hdr, target)...)
 	return findings
+}
+
+func hasCacheControlGuard(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return false
+	}
+	for _, tok := range strings.Split(raw, ",") {
+		t := strings.ToLower(strings.TrimSpace(tok))
+		if t == "no-store" || t == "private" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseHSTSMaxAge(val string) (int, bool) {
