@@ -104,12 +104,17 @@ func SanitizeTerminalText(raw string) string {
 
 func FormatTableRender(rep schema.Report) string {
 	var b strings.Builder
+	scoreSuffix := ""
+	if rep.Posture != nil {
+		scoreSuffix = fmt.Sprintf(" | score: %d/100 (%s)", rep.Posture.Score, SanitizeTerminalText(rep.Posture.Grade))
+	}
 	fmt.Fprintf(
 		&b,
-		"%s v%s | layer: %s | total: %d (critical: %d, high: %d, medium: %d, low: %d, info: %d)\n",
+		"%s v%s | layer: %s%s | total: %d (critical: %d, high: %d, medium: %d, low: %d, info: %d)\n",
 		SanitizeTerminalText(rep.Tool),
 		schema.Version,
 		SanitizeTerminalText(rep.Layer),
+		scoreSuffix,
 		rep.Summary.Total,
 		rep.Summary.Critical,
 		rep.Summary.High,

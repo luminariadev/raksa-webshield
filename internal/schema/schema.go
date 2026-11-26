@@ -12,8 +12,8 @@ const (
 	LayerWeb      = "web-defense"
 )
 
-// Version can be overridden at build time via -ldflags "-X github.com/luminariadev/raksa-webshield/internal/schema.Version=v0.1.0".
-var Version = "0.1.0"
+// Version can be overridden at build time via -ldflags "-X github.com/luminariadev/raksa-webshield/internal/schema.Version=v0.2.0".
+var Version = "0.2.0"
 
 type Severity string
 
@@ -90,13 +90,58 @@ type Summary struct {
 	Info     int `json:"info"`
 }
 
+type PostureScore struct {
+	Score int    `json:"score"`
+	Grade string `json:"grade"`
+}
+
 type Report struct {
-	SchemaVersion string    `json:"schema_version"`
-	Tool          string    `json:"tool"`
-	Layer         string    `json:"layer"`
-	GeneratedAt   time.Time `json:"generated_at"`
-	Summary       Summary   `json:"summary"`
-	Findings      []Finding `json:"findings"`
+	SchemaVersion string        `json:"schema_version"`
+	Tool          string        `json:"tool"`
+	Layer         string        `json:"layer"`
+	GeneratedAt   time.Time     `json:"generated_at"`
+	Posture       *PostureScore `json:"posture,omitempty"`
+	Summary       Summary       `json:"summary"`
+	Findings      []Finding     `json:"findings"`
+}
+
+func ComputePosture(findings []Finding) *PostureScore {
+	score := 100
+	for _, f := range findings {
+		switch f.Severity {
+		case SeverityCritical:
+			score -= 30
+		case SeverityHigh:
+			score -= 18
+		case SeverityMedium:
+			score -= 8
+		case SeverityLow:
+			score -= 3
+		case SeverityInfo:
+			// Informational findings do not penalize posture score.
+		}
+	}
+	if score < 0 {
+		score = 0
+	}
+
+	grade := "F"
+	switch {
+	case score >= 95:
+		grade = "A+"
+	case score >= 90:
+		grade = "A"
+	case score >= 80:
+		grade = "B"
+	case score >= 70:
+		grade = "C"
+	case score >= 55:
+		grade = "D"
+	}
+	return &PostureScore{
+		Score: score,
+		Grade: grade,
+	}
 }
 
 func NewReport(findings []Finding, generatedAt time.Time) Report {
@@ -124,6 +169,7 @@ func NewReport(findings []Finding, generatedAt time.Time) Report {
 		Tool:          ToolName,
 		Layer:         LayerWeb,
 		GeneratedAt:   generatedAt.UTC(),
+		Posture:       ComputePosture(findings),
 		Summary:       sum,
 		Findings:      findings,
 	}

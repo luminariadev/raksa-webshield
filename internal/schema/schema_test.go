@@ -24,10 +24,10 @@ func TestParseSeverityAndThresholds(t *testing.T) {
 	}
 }
 
-func TestRuleCatalogContains18UniqueRules(t *testing.T) {
+func TestRuleCatalogContains28UniqueRules(t *testing.T) {
 	rules := RuleCatalog()
-	if len(rules) != 18 {
-		t.Fatalf("expected 18 rules, got %d", len(rules))
+	if len(rules) != 28 {
+		t.Fatalf("expected 28 rules, got %d", len(rules))
 	}
 	seen := make(map[string]struct{}, len(rules))
 	for _, r := range rules {
@@ -38,6 +38,33 @@ func TestRuleCatalogContains18UniqueRules(t *testing.T) {
 			t.Fatalf("duplicate rule id %q", r.RuleID)
 		}
 		seen[r.RuleID] = struct{}{}
+	}
+}
+
+func TestComputePostureBoundariesAndClamping(t *testing.T) {
+	cases := []struct {
+		name     string
+		findings []Finding
+		want     int
+		grade    string
+	}{
+		{"clean", nil, 100, "A+"},
+		{"one_low_and_info", []Finding{{Severity: SeverityLow}, {Severity: SeverityInfo}}, 97, "A+"},
+		{"one_medium", []Finding{{Severity: SeverityMedium}}, 92, "A"},
+		{"one_high", []Finding{{Severity: SeverityHigh}}, 82, "B"},
+		{"one_critical", []Finding{{Severity: SeverityCritical}}, 70, "C"},
+		{"high_and_three_medium", []Finding{{Severity: SeverityHigh}, {Severity: SeverityMedium}, {Severity: SeverityMedium}, {Severity: SeverityMedium}}, 58, "D"},
+		{"critical_and_high", []Finding{{Severity: SeverityCritical}, {Severity: SeverityHigh}}, 52, "F"},
+		{"clamp_zero", []Finding{{Severity: SeverityCritical}, {Severity: SeverityCritical}, {Severity: SeverityCritical}, {Severity: SeverityCritical}}, 0, "F"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := ComputePosture(tc.findings)
+			if p.Score != tc.want || p.Grade != tc.grade {
+				t.Fatalf("got %d (%s), want %d (%s)", p.Score, p.Grade, tc.want, tc.grade)
+			}
+		})
 	}
 }
 
