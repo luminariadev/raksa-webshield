@@ -1,0 +1,34 @@
+version: "1.0"
+rules:
+  - id: VPATCH-GRAPHQL-INTROSPECTION
+    title: Block unauthenticated GraphQL schema introspection query
+    severity: medium
+    weight: 4
+    targets: [body, query]
+    match_type: regex
+    pattern: "__schema\\b"
+    case_insensitive: true
+    action: block
+    remediation: Disable GraphQL schema introspection in production gateways.
+
+  - id: VPATCH-SPRING-ACTUATOR-ENV
+    title: Block Spring Boot Actuator environment exposure path
+    severity: critical
+    weight: 5
+    targets: [path, all]
+    match_type: contains
+    pattern: "/actuator/env"
+    case_insensitive: true
+    action: block
+    remediation: Restrict Spring Boot Actuator management endpoints to internal admin interfaces.
+
+  - id: VPATCH-LEGACY-APIKEY-QUERY
+    title: Alert on raw API key transmitted inside URL query parameters
+    severity: high
+    weight: 4
+    targets: [query, all]
+    match_type: regex
+    pattern: "[?&]api_key=[A-Za-z0-9_-]{8,}"
+    case_insensitive: true
+    action: monitor
+    remediation: Transmit API credentials exclusively in Authorization headers rather than query strings.
