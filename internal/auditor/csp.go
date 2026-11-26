@@ -29,6 +29,14 @@ func ParseCSP(policyStr string) map[string][]string {
 	return directives
 }
 
+func AuditCSPFile(path string) ([]schema.Finding, error) {
+	raw, err := readBoundedText(path)
+	if err != nil {
+		return nil, err
+	}
+	return AuditCSP(raw, "file://"+normalizePath(path)), nil
+}
+
 func AuditCSP(policyStr string, target string) []schema.Finding {
 	now := time.Now().UTC()
 	directives := ParseCSP(policyStr)
