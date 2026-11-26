@@ -28,7 +28,7 @@ rules:
     weight: 4
     targets: [query, all]
     match_type: regex
-    pattern: "[?&]api_key=[A-Za-z0-9_-]{8,}"
+    pattern: "(?:^|[?&])api_key=[A-Za-z0-9_-]{8,}"
     case_insensitive: true
     action: monitor
     remediation: Transmit API credentials exclusively in Authorization headers rather than query strings.
