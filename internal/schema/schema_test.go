@@ -24,10 +24,10 @@ func TestParseSeverityAndThresholds(t *testing.T) {
 	}
 }
 
-func TestRuleCatalogContains28UniqueRules(t *testing.T) {
+func TestRuleCatalogContains30UniqueRules(t *testing.T) {
 	rules := RuleCatalog()
-	if len(rules) != 28 {
-		t.Fatalf("expected 28 rules, got %d", len(rules))
+	if len(rules) != 30 {
+		t.Fatalf("expected 30 rules, got %d", len(rules))
 	}
 	seen := make(map[string]struct{}, len(rules))
 	for _, r := range rules {

@@ -293,5 +293,25 @@ func RuleCatalog() []RuleInfo {
 			MitreTechnique:  "Input Validation",
 			Description:     "Input contains CR/LF sequences followed by HTTP response headers such as Set-Cookie or Location.",
 		},
+		{
+			RuleID:          "WEB-311",
+			Title:           "Custom enterprise WAF policy rule matched",
+			Module:          "waf",
+			DefaultSeverity: SeverityHigh,
+			OwaspASVS:       "OWASP ASVS 5.1.3",
+			MitreD3FEND:     "D3-IV",
+			MitreTechnique:  "Input Validation",
+			Description:     "Incoming request payload or path matched a user-defined enterprise YAML WAF policy rule.",
+		},
+		{
+			RuleID:          "WEB-312",
+			Title:           "HTTP request rate limit exceeded in WebShield proxy",
+			Module:          "waf",
+			DefaultSeverity: SeverityMedium,
+			OwaspASVS:       "OWASP ASVS 13.1.4",
+			MitreD3FEND:     "D3-NI",
+			MitreTechnique:  "Network Isolation",
+			Description:     "Client exceeded the configured sliding/fixed-window request rate threshold enforced by raksa-webshield proxy.",
+		},
 	}
 }

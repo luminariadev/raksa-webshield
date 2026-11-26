@@ -12,8 +12,8 @@ const (
 	LayerWeb      = "web-defense"
 )
 
-// Version can be overridden at build time via -ldflags "-X github.com/luminariadev/raksa-webshield/internal/schema.Version=v0.2.0".
-var Version = "0.2.0"
+// Version can be overridden at build time via -ldflags "-X github.com/luminariadev/raksa-webshield/internal/schema.Version=v0.3.0".
+var Version = "0.3.0"
 
 type Severity string
 
