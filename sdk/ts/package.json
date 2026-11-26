@@ -1,7 +1,7 @@
 {
   "name": "@raksa/webshield",
-  "version": "0.1.0",
-  "description": "Zero-dependency TypeScript anti-XSS HTML sanitizer, security header builder, and defensive mini-WAF middleware (Raksa Layer 3)",
+  "version": "0.2.0",
+  "description": "Zero-dependency TypeScript anti-XSS HTML sanitizer, security header builder, rate limiter, and 10-class defensive WAF middleware (Raksa Layer 3)",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

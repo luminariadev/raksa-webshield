@@ -21,7 +21,7 @@ const DEFAULT_ALLOWED_TAGS = new Set([
   "span",
 ]);
 
-const VOID_TAGS = new Set(["br"]);
+const VOID_TAGS = new Set(["br", "hr", "img", "wbr"]);
 
 const EXECUTABLE_DROP_BLOCK_RE =
   /<\s*(script|style|iframe|object|embed|svg|math|template|noscript|textarea|xmp)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi;
@@ -31,6 +31,7 @@ const DANGLING_OPEN_BLOCK_RE =
 const DEFAULT_ALLOWED_ATTRS: Record<string, Set<string>> = {
   "*": new Set(["class", "title", "dir", "lang"]),
   a: new Set(["href", "title", "target", "rel", "class"]),
+  img: new Set(["src", "alt", "title", "width", "height", "class"]),
 };
 
 const NAMED_ENTITIES: Record<string, string> = {
@@ -48,6 +49,16 @@ const NAMED_ENTITIES: Record<string, string> = {
 export function escapeHtml(input: string): string {
   return input
     .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/`/g, "&#96;");
+}
+
+function escapeTextNodeIdempotent(input: string): string {
+  return input
+    .replace(/&(?!amp;|lt;|gt;|quot;|#39;|#96;)/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
@@ -80,7 +91,14 @@ export function decodeHtmlEntities(input: string): string {
 }
 
 export function isSafeUrl(rawUrl: string, allowMailto = true): boolean {
-  const decoded = decodeHtmlEntities(rawUrl);
+  let decoded = rawUrl;
+  for (let pass = 0; pass < 3; pass++) {
+    const next = decodeHtmlEntities(decoded);
+    if (next === decoded) {
+      break;
+    }
+    decoded = next;
+  }
   // Remove ASCII control chars and whitespace to defeat java\tscript: / \x01javascript: tricks.
   let normalized = "";
   for (let i = 0; i < decoded.length; i++) {
@@ -151,21 +169,22 @@ function tokenizeAndFilter(
   let out = "";
   let i = 0;
   const len = input.length;
+  const openStack: string[] = [];
 
   while (i < len) {
     const lt = input.indexOf("<", i);
     if (lt === -1) {
-      out += escapeHtml(input.slice(i));
+      out += escapeTextNodeIdempotent(input.slice(i));
       break;
     }
     if (lt > i) {
-      out += escapeHtml(input.slice(i, lt));
+      out += escapeTextNodeIdempotent(input.slice(i, lt));
     }
 
     const gt = findTagEnd(input, lt + 1);
     if (gt === -1) {
       // Unclosed '<' gets escaped rather than executed.
-      out += escapeHtml(input.slice(lt));
+      out += escapeTextNodeIdempotent(input.slice(lt));
       break;
     }
 
@@ -189,18 +208,34 @@ function tokenizeAndFilter(
     }
 
     if (isClosing) {
-      if (!VOID_TAGS.has(tagName)) {
-        out += `</${tagName}>`;
+      if (VOID_TAGS.has(tagName)) {
+        continue;
+      }
+      const matchIdx = openStack.lastIndexOf(tagName);
+      if (matchIdx === -1) {
+        continue;
+      }
+      while (openStack.length > matchIdx) {
+        const closed = openStack.pop();
+        if (closed) {
+          out += `</${closed}>`;
+        }
       }
       continue;
     }
 
     const rawAttrStr = (match[2] ?? "").replace(/\/\s*$/, "").trim();
     const safeAttrs = filterAttributes(tagName, rawAttrStr, allowedAttrs, allowMailto);
-    if (VOID_TAGS.has(tagName)) {
-      out += `<${tagName}${safeAttrs}>`;
-    } else {
-      out += `<${tagName}${safeAttrs}>`;
+    out += `<${tagName}${safeAttrs}>`;
+    if (!VOID_TAGS.has(tagName)) {
+      openStack.push(tagName);
+    }
+  }
+
+  while (openStack.length > 0) {
+    const dangling = openStack.pop();
+    if (dangling) {
+      out += `</${dangling}>`;
     }
   }
 
@@ -284,6 +319,7 @@ function buildAttrMap(
   const map: Record<string, Set<string>> = {
     "*": new Set(DEFAULT_ALLOWED_ATTRS["*"]),
     a: new Set(DEFAULT_ALLOWED_ATTRS["a"]),
+    img: new Set(DEFAULT_ALLOWED_ATTRS["img"]),
   };
   if (!custom) {
     return map;
