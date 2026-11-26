@@ -22,8 +22,8 @@ func TestCLIVersionRulesAndErrors(t *testing.T) {
 		t.Fatalf("rules failed: code=%d err=%q", code, errOut.String())
 	}
 	var rules []any
-	if err := json.Unmarshal(out.Bytes(), &rules); err != nil || len(rules) != 18 {
-		t.Fatalf("expected 18 rules JSON, got len=%d err=%v", len(rules), err)
+	if err := json.Unmarshal(out.Bytes(), &rules); err != nil || len(rules) != 28 {
+		t.Fatalf("expected 28 rules JSON, got len=%d err=%v", len(rules), err)
 	}
 
 	out.Reset()
@@ -128,7 +128,28 @@ func TestCLIMCPStdioHandshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := listResp["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 6 {
-		t.Fatalf("expected 6 MCP tools, got %d", len(tools))
+	if len(tools) != 7 {
+		t.Fatalf("expected 7 MCP tools, got %d", len(tools))
+	}
+}
+
+func TestCLIGeneratePolicyAndWAFAnomalyFlags(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := run([]string{"generate-policy", "--target", "nextjs", "--profile", "strict"}, nil, &out, &errOut)
+	if code != 0 || !strings.Contains(out.String(), "Strict-Transport-Security") {
+		t.Fatalf("generate-policy nextjs failed: code=%d err=%q", code, errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code = run([]string{"inspect-request", "--input", "; id", "--anomaly-threshold", "10", "--fail-on", "low"}, nil, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected threshold 10 to suppress single score-5 finding, got exit %d", code)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code = run([]string{"inspect-request", "--input", "ok", "--paranoia", "5"}, nil, &out, &errOut); code != 1 {
+		t.Fatalf("expected exit 1 on out-of-range --paranoia, got %d", code)
 	}
 }

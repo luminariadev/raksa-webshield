@@ -130,45 +130,53 @@ func FetchAndAuditURL(ctx context.Context, rawURL string, allowPrivate bool) ([]
 
 	findings := AuditHeadersWithProbe(resp.Header, parsedURL.String(), LiveProbeOrigin)
 	if resp.TLS != nil {
-		now := time.Now().UTC()
-		if resp.TLS.Version != 0 && resp.TLS.Version < tls.VersionTLS12 {
-			findings = append(findings, newFinding(
-				"WEB-201", "config", schema.SeverityHigh,
-				"Live endpoint negotiated deprecated TLS protocol",
-				fmt.Sprintf("Live TLS handshake negotiated deprecated protocol version 0x%04x.", resp.TLS.Version),
-				parsedURL.String(),
-				map[string]any{"tls_version": resp.TLS.Version, "owasp_asvs": "9.1.2"},
-				"Disable TLSv1.0 and TLSv1.1 on the edge/reverse proxy and enforce TLSv1.2+.",
-				"D3-CH", "live-tls-version", now,
-			))
-		}
-		if len(resp.TLS.PeerCertificates) > 0 {
-			leaf := resp.TLS.PeerCertificates[0]
-			remaining := time.Until(leaf.NotAfter)
-			if remaining <= 0 {
-				findings = append(findings, newFinding(
-					"WEB-207", "config", schema.SeverityHigh,
-					"Live TLS certificate has expired",
-					fmt.Sprintf("Server leaf certificate expired on %s.", leaf.NotAfter.UTC().Format(time.RFC3339)),
-					parsedURL.String(),
-					map[string]any{"not_after": leaf.NotAfter.UTC().Format(time.RFC3339), "subject": leaf.Subject.CommonName, "owasp_asvs": "9.1.3"},
-					"Renew and deploy a valid TLS certificate immediately.",
-					"D3-CH", "live-tls-cert-expired", now,
-				))
-			} else if remaining < 14*24*time.Hour {
-				findings = append(findings, newFinding(
-					"WEB-207", "config", schema.SeverityMedium,
-					"Live TLS certificate expires within 14 days",
-					fmt.Sprintf("Server leaf certificate expires in %.1f days (%s).", remaining.Hours()/24, leaf.NotAfter.UTC().Format(time.RFC3339)),
-					parsedURL.String(),
-					map[string]any{"not_after": leaf.NotAfter.UTC().Format(time.RFC3339), "subject": leaf.Subject.CommonName, "owasp_asvs": "9.1.3"},
-					"Renew the TLS certificate before expiration or automate renewal.",
-					"D3-CH", "live-tls-cert-expiring", now,
-				))
-			}
-		}
+		findings = append(findings, inspectTLSState(resp.TLS, parsedURL.String(), time.Now().UTC())...)
 	}
 	return findings, nil
+}
+
+func inspectTLSState(state *tls.ConnectionState, target string, now time.Time) []schema.Finding {
+	if state == nil {
+		return nil
+	}
+	var findings []schema.Finding
+	if state.Version != 0 && state.Version < tls.VersionTLS12 {
+		findings = append(findings, newFinding(
+			"WEB-201", "config", schema.SeverityHigh,
+			"Live endpoint negotiated deprecated TLS protocol",
+			fmt.Sprintf("Live TLS handshake negotiated deprecated protocol version 0x%04x.", state.Version),
+			target,
+			map[string]any{"tls_version": state.Version, "owasp_asvs": "9.1.2"},
+			"Disable TLSv1.0 and TLSv1.1 on the edge/reverse proxy and enforce TLSv1.2+.",
+			"D3-CH", "live-tls-version", now,
+		))
+	}
+	if len(state.PeerCertificates) > 0 {
+		leaf := state.PeerCertificates[0]
+		remaining := leaf.NotAfter.Sub(now)
+		if remaining <= 0 {
+			findings = append(findings, newFinding(
+				"WEB-207", "config", schema.SeverityHigh,
+				"Live TLS certificate has expired",
+				fmt.Sprintf("Server leaf certificate expired on %s.", leaf.NotAfter.UTC().Format(time.RFC3339)),
+				target,
+				map[string]any{"not_after": leaf.NotAfter.UTC().Format(time.RFC3339), "subject": leaf.Subject.CommonName, "owasp_asvs": "9.1.3"},
+				"Renew and deploy a valid TLS certificate immediately.",
+				"D3-CH", "live-tls-cert-expired", now,
+			))
+		} else if remaining < 14*24*time.Hour {
+			findings = append(findings, newFinding(
+				"WEB-207", "config", schema.SeverityMedium,
+				"Live TLS certificate expires within 14 days",
+				fmt.Sprintf("Server leaf certificate expires in %.1f days (%s).", remaining.Hours()/24, leaf.NotAfter.UTC().Format(time.RFC3339)),
+				target,
+				map[string]any{"not_after": leaf.NotAfter.UTC().Format(time.RFC3339), "subject": leaf.Subject.CommonName, "owasp_asvs": "9.1.3"},
+				"Renew the TLS certificate before expiration or automate renewal.",
+				"D3-CH", "live-tls-cert-expiring", now,
+			))
+		}
+	}
+	return findings
 }
 
 func isDisallowedIP(ip net.IP) bool {

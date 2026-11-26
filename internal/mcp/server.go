@@ -210,6 +210,8 @@ func handleToolCall(reqID json.RawMessage, rawParams json.RawMessage) *rpcRespon
 		return callInspectPayload(reqID, p.Arguments)
 	case "webshield_audit_workspace":
 		return callAuditWorkspace(reqID, p.Arguments)
+	case "webshield_generate_remediation":
+		return callGenerateRemediation(reqID, p.Arguments)
 	default:
 		return &rpcResponse{
 			JSONRPC: "2.0",
@@ -326,11 +328,38 @@ func callInspectPayload(reqID json.RawMessage, args map[string]any) *rpcResponse
 		label = "inline://payload"
 	}
 
-	findings, err := auditor.InspectPayload(payload, label)
+	paranoia := optInt(args, "paranoia_level", 1)
+	if paranoia < 1 || paranoia > 3 {
+		return invalidParams(reqID, "'paranoia_level' must be between 1 and 3")
+	}
+	threshold := optInt(args, "anomaly_threshold", 0)
+	if threshold < 0 {
+		return invalidParams(reqID, "'anomaly_threshold' must be >= 0")
+	}
+
+	findings, err := auditor.InspectPayloadWithOptions(payload, label, auditor.InspectOptions{
+		ParanoiaLevel:    paranoia,
+		AnomalyThreshold: threshold,
+	})
 	if err != nil {
 		return invalidParams(reqID, err.Error())
 	}
 	return finishReportTool(reqID, findings, args)
+}
+
+func callGenerateRemediation(reqID json.RawMessage, args map[string]any) *rpcResponse {
+	target, ok := optString(args, "target")
+	if !ok || strings.TrimSpace(target) == "" {
+		return invalidParams(reqID, "missing string 'target'")
+	}
+	profile, _ := optString(args, "profile")
+	origin, _ := optString(args, "origin")
+
+	snippet, err := auditor.GenerateHardenedConfig(target, profile, origin)
+	if err != nil {
+		return toolResultErr(reqID, fmt.Sprintf("generate remediation failed: %v", err))
+	}
+	return toolResultOK(reqID, snippet)
 }
 
 func callAuditWorkspace(reqID json.RawMessage, args map[string]any) *rpcResponse {
@@ -383,6 +412,21 @@ func optBool(args map[string]any, key string, fallback bool) bool {
 	return b
 }
 
+func optInt(args map[string]any, key string, fallback int) int {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return fallback
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	default:
+		return fallback
+	}
+}
+
 func invalidParams(reqID json.RawMessage, msg string) *rpcResponse {
 	return &rpcResponse{
 		JSONRPC: "2.0",
@@ -417,7 +461,7 @@ func toolDefinitions() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "webshield_list_rules",
-			"description": "List all 18 HTTP header, CSP, CORS, cookie, reverse-proxy config, and defensive WAF rules supported by raksa-webshield.",
+			"description": "List all 28 HTTP header, CSP, CORS, cookie, reverse-proxy config, TLS, and 10-class defensive WAF rules supported by raksa-webshield.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
 				"properties":           map[string]any{},
@@ -470,13 +514,15 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "webshield_inspect_payload",
-			"description": "Defensively inspect HTTP parameters or JSON/text payloads for XSS, SQLi, Path Traversal, Prototype Pollution, and metadata SSRF patterns.",
+			"description": "Defensively inspect HTTP parameters or JSON/text payloads across 10 attack classes (XSS, SQLi, LFI, Proto, SSRF, CmdI, SSTI, NoSQL, XXE, CRLF) with anomaly scoring.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"payload":      map[string]any{"type": "string", "description": "Payload string to inspect (max 1 MiB)."},
-					"source_label": map[string]any{"type": "string", "description": "Optional label identifying request context."},
-					"policy_path":  map[string]any{"type": "string", "description": "Optional YAML/JSON suppression policy path."},
+					"payload":           map[string]any{"type": "string", "description": "Payload string to inspect (max 1 MiB)."},
+					"source_label":      map[string]any{"type": "string", "description": "Optional label identifying request context."},
+					"paranoia_level":    map[string]any{"type": "integer", "description": "WAF paranoia level 1-3 (default 1)."},
+					"anomaly_threshold": map[string]any{"type": "integer", "description": "Minimum total anomaly score to report findings (default 0)."},
+					"policy_path":       map[string]any{"type": "string", "description": "Optional YAML/JSON suppression policy path."},
 				},
 				"required":             []string{"payload"},
 				"additionalProperties": false,
@@ -484,7 +530,7 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "webshield_audit_workspace",
-			"description": "Recursively audit an entire workspace for insecure reverse-proxy configurations and saved HTTP header dumps with optional suppression policy.",
+			"description": "Recursively audit an entire workspace for insecure Nginx/Caddy/Vercel/Ingress configs and saved HTTP header dumps with optional suppression policy.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -492,6 +538,20 @@ func toolDefinitions() []map[string]any {
 					"policy_path": map[string]any{"type": "string", "description": "Optional YAML/JSON suppression policy path."},
 				},
 				"required":             []string{"path"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			"name":        "webshield_generate_remediation",
+			"description": "Generate hardened Nginx, Caddyfile, Next.js, or HTTP header snippets that pass all raksa-webshield v0.2.0 security posture rules cleanly.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target":  map[string]any{"type": "string", "description": "Target format: nginx, caddy, nextjs, or headers."},
+					"profile": map[string]any{"type": "string", "description": "Hardening profile: strict (default) or balanced."},
+					"origin":  map[string]any{"type": "string", "description": "Optional trusted CORS origin (https://...)."},
+				},
+				"required":             []string{"target"},
 				"additionalProperties": false,
 			},
 		},

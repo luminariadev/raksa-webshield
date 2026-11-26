@@ -53,8 +53,8 @@ func TestMCPLifecycleToolsListRulesAndErrorCodes(t *testing.T) {
 		t.Fatalf("expected -32600 invalid request")
 	}
 	tools := res[3]["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 6 {
-		t.Fatalf("expected 6 MCP tools, got %d", len(tools))
+	if len(tools) != 7 {
+		t.Fatalf("expected 7 MCP tools, got %d", len(tools))
 	}
 
 	rulesText := res[4]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
@@ -62,8 +62,8 @@ func TestMCPLifecycleToolsListRulesAndErrorCodes(t *testing.T) {
 	if err := json.Unmarshal([]byte(rulesText), &rules); err != nil {
 		t.Fatal(err)
 	}
-	if len(rules) != 18 {
-		t.Fatalf("expected 18 rules, got %d", len(rules))
+	if len(rules) != 28 {
+		t.Fatalf("expected 28 rules, got %d", len(rules))
 	}
 	if int(res[5]["error"].(map[string]any)["code"].(float64)) != -32601 {
 		t.Fatalf("expected -32601 method not found")
@@ -150,5 +150,44 @@ func TestMCPToolAuditsSizeGuardSSRFAndPolicy(t *testing.T) {
 		if f["rule_id"] == "WEB-005" && strings.Contains(f["target"].(string), "headers_insecure.http") {
 			t.Fatalf("WEB-005 on headers_insecure.http should be suppressed by policy")
 		}
+	}
+
+	remReq, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      14,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "webshield_generate_remediation",
+			"arguments": map[string]any{
+				"target":  "nginx",
+				"profile": "strict",
+			},
+		},
+	})
+	wafThrReq, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      15,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "webshield_inspect_payload",
+			"arguments": map[string]any{
+				"payload":           "; id",
+				"paranoia_level":    2,
+				"anomaly_threshold": 9,
+			},
+		},
+	})
+	res2 := runSession(t, []string{string(remReq), string(wafThrReq)})
+	remText := res2[0]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(remText, "ssl_protocols TLSv1.2 TLSv1.3;") {
+		t.Fatalf("expected hardened nginx snippet from MCP remediation tool, got: %s", remText)
+	}
+	wafText := res2[1]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	var wafRep map[string]any
+	if err := json.Unmarshal([]byte(wafText), &wafRep); err != nil {
+		t.Fatal(err)
+	}
+	if int(wafRep["summary"].(map[string]any)["total"].(float64)) != 0 {
+		t.Fatalf("expected anomaly_threshold=9 to suppress score-5 finding")
 	}
 }

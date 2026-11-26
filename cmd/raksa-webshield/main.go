@@ -48,6 +48,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdInspectRequest(subArgs, stdout, stderr)
 	case "audit-workspace":
 		return cmdAuditWorkspace(subArgs, stdout, stderr)
+	case "generate-policy":
+		return cmdGeneratePolicy(subArgs, stdout, stderr)
 	case "mcp":
 		if err := mcp.ServeStreams(stdin, stdout); err != nil {
 			fmt.Fprintf(stderr, "error: mcp server failed: %v\n", err)
@@ -62,18 +64,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintf(w, `raksa-webshield v%s - Defensive Web Security, Header, CSP, Proxy, and Mini-WAF CLI (Raksa Layer 3)
+	fmt.Fprintf(w, `raksa-webshield v%s - Defensive Web Security, Header, CSP, Proxy, and WAF CLI (Raksa Layer 3)
 
 Usage: raksa-webshield <command> [flags]
 
 Commands:
   audit-headers    Audit HTTP headers from --file or read-only SSRF-safe --url (WEB-001..104)
-  audit-csp        Audit Content-Security-Policy from --policy-string or --file (WEB-003)
-  audit-config     Audit Nginx/Caddy reverse-proxy configs statically (WEB-201..204)
-  inspect-request  Defensively inspect request/JSON payload for XSS/SQLi/LFI/Proto/SSRF (WEB-301..305)
+  audit-csp        Audit Content-Security-Policy from --policy-string or --file (WEB-003, WEB-006)
+  audit-config     Audit Nginx/Caddy/Vercel/Ingress reverse-proxy configs statically (WEB-201..207)
+  inspect-request  Defensively inspect payload across 10 attack classes with anomaly scoring (WEB-301..310)
   audit-workspace  Recursively audit repository web configs and header dumps
-  rules            List all 18 detection rules mapped to OWASP ASVS and MITRE D3FEND
-  mcp              Start stdio JSON-RPC 2.0 MCP server (6 tools)
+  generate-policy  Generate hardened nginx, caddy, nextjs, or HTTP header snippets
+  rules            List all 28 detection rules mapped to OWASP ASVS and MITRE D3FEND
+  mcp              Start stdio JSON-RPC 2.0 MCP server (7 tools)
   version          Print version and Raksa schema contract
 `, schema.Version)
 }
@@ -230,9 +233,20 @@ func cmdInspectRequest(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("inspect-request", stderr)
 	inputStr := fs.String("input", "", "Inline payload string to inspect")
 	filePath := fs.String("file", "", "Path to saved payload file to inspect")
+	paranoia := fs.Int("paranoia", 1, "WAF paranoia level (1-3)")
+	anomalyThreshold := fs.Int("anomaly-threshold", 0, "Minimum anomaly score threshold required to report/breach (0 = immediate match)")
 	formatStr, failOnStr, polStr, outStr := parseReportFlags(fs)
 	if done, code := parseArgsWithHelp(fs, args); done {
 		return code
+	}
+
+	if *paranoia < 1 || *paranoia > 3 {
+		fmt.Fprintln(stderr, "error: --paranoia must be between 1 and 3")
+		return 1
+	}
+	if *anomalyThreshold < 0 {
+		fmt.Fprintln(stderr, "error: --anomaly-threshold must be >= 0")
+		return 1
 	}
 
 	hasInput := strings.TrimSpace(*inputStr) != ""
@@ -242,12 +256,17 @@ func cmdInspectRequest(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	opts := auditor.InspectOptions{
+		ParanoiaLevel:    *paranoia,
+		AnomalyThreshold: *anomalyThreshold,
+	}
+
 	var findings []schema.Finding
 	var err error
 	if hasFile {
-		findings, err = auditor.InspectPayloadFile(*filePath)
+		findings, err = auditor.InspectPayloadFileWithOptions(*filePath, opts)
 	} else {
-		findings, err = auditor.InspectPayload(*inputStr, "inline://request")
+		findings, err = auditor.InspectPayloadWithOptions(*inputStr, "inline://request", opts)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -255,6 +274,43 @@ func cmdInspectRequest(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return emitReport(findings, *formatStr, *failOnStr, *polStr, *outStr, stdout, stderr)
+}
+
+func cmdGeneratePolicy(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("generate-policy", stderr)
+	target := fs.String("target", "nginx", "Remediation target: nginx, caddy, nextjs, or headers")
+	profile := fs.String("profile", "strict", "Hardening profile: strict or balanced")
+	origin := fs.String("origin", "", "Optional explicit trusted CORS origin (e.g. https://app.example.com)")
+	outputPath := fs.String("output", "", "Write generated configuration snippet to file instead of stdout")
+	if done, code := parseArgsWithHelp(fs, args); done {
+		return code
+	}
+
+	rendered, err := auditor.GenerateHardenedConfig(*target, *profile, *origin)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	if strings.TrimSpace(*outputPath) != "" {
+		if parent := filepath.Dir(*outputPath); parent != "." && parent != "" {
+			if err := os.MkdirAll(parent, 0o755); err != nil {
+				fmt.Fprintf(stderr, "error: create output directory: %v\n", err)
+				return 1
+			}
+		}
+		if err := os.WriteFile(*outputPath, []byte(rendered), 0o644); err != nil {
+			fmt.Fprintf(stderr, "error: write output file %q: %v\n", *outputPath, err)
+			return 1
+		}
+		return 0
+	}
+
+	if _, err := io.WriteString(stdout, rendered); err != nil {
+		fmt.Fprintf(stderr, "error: write output: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func cmdAuditWorkspace(args []string, stdout, stderr io.Writer) int {
