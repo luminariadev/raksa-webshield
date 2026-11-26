@@ -53,8 +53,8 @@ func TestMCPLifecycleToolsListRulesAndErrorCodes(t *testing.T) {
 		t.Fatalf("expected -32600 invalid request")
 	}
 	tools := res[3]["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 7 {
-		t.Fatalf("expected 7 MCP tools, got %d", len(tools))
+	if len(tools) != 8 {
+		t.Fatalf("expected 8 MCP tools, got %d", len(tools))
 	}
 
 	rulesText := res[4]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
@@ -62,8 +62,8 @@ func TestMCPLifecycleToolsListRulesAndErrorCodes(t *testing.T) {
 	if err := json.Unmarshal([]byte(rulesText), &rules); err != nil {
 		t.Fatal(err)
 	}
-	if len(rules) != 28 {
-		t.Fatalf("expected 28 rules, got %d", len(rules))
+	if len(rules) != 30 {
+		t.Fatalf("expected 30 rules, got %d", len(rules))
 	}
 	if int(res[5]["error"].(map[string]any)["code"].(float64)) != -32601 {
 		t.Fatalf("expected -32601 method not found")
@@ -189,5 +189,57 @@ func TestMCPToolAuditsSizeGuardSSRFAndPolicy(t *testing.T) {
 	}
 	if int(wafRep["summary"].(map[string]any)["total"].(float64)) != 0 {
 		t.Fatalf("expected anomaly_threshold=9 to suppress score-5 finding")
+	}
+
+	valOkReq, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      16,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "webshield_validate_custom_rules",
+			"arguments": map[string]any{
+				"yaml_content": "rules:\n  - id: R-GQL\n    match_type: regex\n    pattern: \"__schema\"\n    action: block\n",
+				"test_payload": "{ __schema { queryType { name } } }",
+			},
+		},
+	})
+	valBadReq, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      17,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "webshield_validate_custom_rules",
+			"arguments": map[string]any{
+				"yaml_content": "rules:\n  - id: R-BAD\n    match_type: regex\n    pattern: \"[invalid\"\n",
+			},
+		},
+	})
+	customInspectReq, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      18,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "webshield_inspect_payload",
+			"arguments": map[string]any{
+				"payload":           "/actuator/env",
+				"custom_rules_path": filepath.Join("..", "..", "examples", "custom-waf-rules.yml"),
+			},
+		},
+	})
+	res3 := runSession(t, []string{string(valOkReq), string(valBadReq), string(customInspectReq)})
+	valOkText := res3[0]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	var valOut map[string]any
+	if err := json.Unmarshal([]byte(valOkText), &valOut); err != nil {
+		t.Fatal(err)
+	}
+	if !valOut["valid"].(bool) || !valOut["dry_run_would_block"].(bool) {
+		t.Fatalf("expected valid custom rules with dry_run_would_block=true, got %+v", valOut)
+	}
+	if !res3[1]["result"].(map[string]any)["isError"].(bool) {
+		t.Fatalf("expected invalid regex YAML to return isError=true")
+	}
+	ciText := res3[2]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(ciText, "WEB-311") {
+		t.Fatalf("expected WEB-311 from custom_rules_path in MCP inspect, got %s", ciText)
 	}
 }

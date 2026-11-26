@@ -22,8 +22,8 @@ func TestCLIVersionRulesAndErrors(t *testing.T) {
 		t.Fatalf("rules failed: code=%d err=%q", code, errOut.String())
 	}
 	var rules []any
-	if err := json.Unmarshal(out.Bytes(), &rules); err != nil || len(rules) != 28 {
-		t.Fatalf("expected 28 rules JSON, got len=%d err=%v", len(rules), err)
+	if err := json.Unmarshal(out.Bytes(), &rules); err != nil || len(rules) != 30 {
+		t.Fatalf("expected 30 rules JSON, got len=%d err=%v", len(rules), err)
 	}
 
 	out.Reset()
@@ -128,8 +128,8 @@ func TestCLIMCPStdioHandshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := listResp["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 7 {
-		t.Fatalf("expected 7 MCP tools, got %d", len(tools))
+	if len(tools) != 8 {
+		t.Fatalf("expected 8 MCP tools, got %d", len(tools))
 	}
 }
 
@@ -151,5 +151,25 @@ func TestCLIGeneratePolicyAndWAFAnomalyFlags(t *testing.T) {
 	errOut.Reset()
 	if code = run([]string{"inspect-request", "--input", "ok", "--paranoia", "5"}, nil, &out, &errOut); code != 1 {
 		t.Fatalf("expected exit 1 on out-of-range --paranoia, got %d", code)
+	}
+
+	customPath := filepath.Join("..", "..", "examples", "custom-waf-rules.yml")
+	out.Reset()
+	errOut.Reset()
+	code = run([]string{"inspect-request", "--input", "{ __schema { types { name } } }", "--custom-rules", customPath, "--fail-on", "medium"}, nil, &out, &errOut)
+	if code != 2 || !strings.Contains(out.String(), "WEB-311") {
+		t.Fatalf("expected exit 2 and WEB-311 on GraphQL introspection payload, got code=%d out=%s err=%s", code, out.String(), errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code = run([]string{"proxy", "--help"}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("expected proxy --help exit 0, got %d", code)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code = run([]string{"proxy"}, nil, &out, &errOut); code != 1 {
+		t.Fatalf("expected proxy without --upstream exit 1, got %d", code)
 	}
 }

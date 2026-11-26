@@ -13,6 +13,7 @@ import (
 
 	"github.com/luminariadev/raksa-webshield/internal/auditor"
 	"github.com/luminariadev/raksa-webshield/internal/policy"
+	"github.com/luminariadev/raksa-webshield/internal/rules"
 	"github.com/luminariadev/raksa-webshield/internal/schema"
 )
 
@@ -212,6 +213,8 @@ func handleToolCall(reqID json.RawMessage, rawParams json.RawMessage) *rpcRespon
 		return callAuditWorkspace(reqID, p.Arguments)
 	case "webshield_generate_remediation":
 		return callGenerateRemediation(reqID, p.Arguments)
+	case "webshield_validate_custom_rules":
+		return callValidateCustomRules(reqID, p.Arguments)
 	default:
 		return &rpcResponse{
 			JSONRPC: "2.0",
@@ -339,12 +342,83 @@ func callInspectPayload(reqID json.RawMessage, args map[string]any) *rpcResponse
 
 	findings, err := auditor.InspectPayloadWithOptions(payload, label, auditor.InspectOptions{
 		ParanoiaLevel:    paranoia,
-		AnomalyThreshold: threshold,
+		AnomalyThreshold: 0,
 	})
 	if err != nil {
 		return invalidParams(reqID, err.Error())
 	}
+
+	if crPath, hasCR := optString(args, "custom_rules_path"); hasCR && strings.TrimSpace(crPath) != "" {
+		cs, crErr := rules.LoadCustomRules(crPath)
+		if crErr != nil {
+			return toolResultErr(reqID, fmt.Sprintf("load custom rules %q failed: %v", crPath, crErr))
+		}
+		customHits, _, _ := cs.Evaluate(payload, "all", label)
+		findings = append(findings, customHits...)
+	}
+
+	if threshold > 0 && len(findings) > 0 {
+		total := 0
+		for _, f := range findings {
+			if f.Evidence != nil {
+				if w, ok := f.Evidence["anomaly_score"].(int); ok {
+					total += w
+					continue
+				}
+			}
+			total += 4
+		}
+		if total < threshold {
+			findings = nil
+		}
+	}
+
 	return finishReportTool(reqID, findings, args)
+}
+
+func callValidateCustomRules(reqID json.RawMessage, args map[string]any) *rpcResponse {
+	pathVal, hasPath := optString(args, "path")
+	yamlVal, hasYAML := optString(args, "yaml_content")
+	if hasPath == hasYAML {
+		return invalidParams(reqID, "provide exactly one of 'path' or 'yaml_content'")
+	}
+
+	var cs *rules.CompiledRuleSet
+	var err error
+	if hasPath {
+		cs, err = rules.LoadCustomRules(pathVal)
+	} else {
+		if len(yamlVal) > rules.MaxCustomRuleBytes {
+			return invalidParams(reqID, fmt.Sprintf("'yaml_content' exceeds %d byte limit", rules.MaxCustomRuleBytes))
+		}
+		cs, err = rules.ParseCustomRules([]byte(yamlVal), "inline://custom-rules.yml")
+	}
+	if err != nil {
+		return toolResultErr(reqID, fmt.Sprintf("custom rule validation failed: %v", err))
+	}
+
+	out := map[string]any{
+		"valid":      true,
+		"rule_count": cs.RuleCount(),
+		"rule_ids":   cs.RuleIDs(),
+	}
+
+	if testPayload, hasTest := optString(args, "test_payload"); hasTest && testPayload != "" {
+		scope, _ := optString(args, "scope")
+		if strings.TrimSpace(scope) == "" {
+			scope = "all"
+		}
+		hits, wouldBlock, score := cs.Evaluate(testPayload, scope, "inline://dry-run")
+		out["dry_run_findings"] = hits
+		out["dry_run_would_block"] = wouldBlock
+		out["dry_run_score"] = score
+	}
+
+	encoded, encErr := json.MarshalIndent(out, "", "  ")
+	if encErr != nil {
+		return toolResultErr(reqID, fmt.Sprintf("encode validation output: %v", encErr))
+	}
+	return toolResultOK(reqID, string(encoded))
 }
 
 func callGenerateRemediation(reqID json.RawMessage, args map[string]any) *rpcResponse {
@@ -461,7 +535,7 @@ func toolDefinitions() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "webshield_list_rules",
-			"description": "List all 28 HTTP header, CSP, CORS, cookie, reverse-proxy config, TLS, and 10-class defensive WAF rules supported by raksa-webshield.",
+			"description": "List all 30 HTTP header, CSP, CORS, cookie, reverse-proxy config, TLS, custom policy, rate-limit, and 10-class defensive WAF rules supported by raksa-webshield.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
 				"properties":           map[string]any{},
@@ -514,7 +588,7 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "webshield_inspect_payload",
-			"description": "Defensively inspect HTTP parameters or JSON/text payloads across 10 attack classes (XSS, SQLi, LFI, Proto, SSRF, CmdI, SSTI, NoSQL, XXE, CRLF) with anomaly scoring.",
+			"description": "Defensively inspect HTTP parameters or JSON/text payloads across 10 attack classes, semantic SQLi/XSS tokenizers, and optional custom YAML rules.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -522,6 +596,7 @@ func toolDefinitions() []map[string]any {
 					"source_label":      map[string]any{"type": "string", "description": "Optional label identifying request context."},
 					"paranoia_level":    map[string]any{"type": "integer", "description": "WAF paranoia level 1-3 (default 1)."},
 					"anomaly_threshold": map[string]any{"type": "integer", "description": "Minimum total anomaly score to report findings (default 0)."},
+					"custom_rules_path": map[string]any{"type": "string", "description": "Optional custom enterprise YAML WAF rules file."},
 					"policy_path":       map[string]any{"type": "string", "description": "Optional YAML/JSON suppression policy path."},
 				},
 				"required":             []string{"payload"},
@@ -543,7 +618,7 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "webshield_generate_remediation",
-			"description": "Generate hardened Nginx, Caddyfile, Next.js, or HTTP header snippets that pass all raksa-webshield v0.2.0 security posture rules cleanly.",
+			"description": "Generate hardened Nginx, Caddyfile, Next.js, or HTTP header snippets that pass all raksa-webshield security posture rules cleanly.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -552,6 +627,20 @@ func toolDefinitions() []map[string]any {
 					"origin":  map[string]any{"type": "string", "description": "Optional trusted CORS origin (https://...)."},
 				},
 				"required":             []string{"target"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			"name":        "webshield_validate_custom_rules",
+			"description": "Validate enterprise custom YAML WAF rules syntax and optionally dry-run them against a test payload without starting the proxy.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":         map[string]any{"type": "string", "description": "Path to YAML custom rules file."},
+					"yaml_content": map[string]any{"type": "string", "description": "Inline YAML custom rules content (max 1 MiB)."},
+					"test_payload": map[string]any{"type": "string", "description": "Optional sample payload to evaluate against validated rules."},
+					"scope":        map[string]any{"type": "string", "description": "Optional evaluation scope: all (default), path, query, headers, or body."},
+				},
 				"additionalProperties": false,
 			},
 		},

@@ -8,14 +8,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/luminariadev/raksa-webshield/internal/auditor"
 	"github.com/luminariadev/raksa-webshield/internal/mcp"
 	"github.com/luminariadev/raksa-webshield/internal/policy"
+	"github.com/luminariadev/raksa-webshield/internal/proxy"
 	"github.com/luminariadev/raksa-webshield/internal/report"
+	"github.com/luminariadev/raksa-webshield/internal/rules"
 	"github.com/luminariadev/raksa-webshield/internal/schema"
 )
 
@@ -50,6 +54,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdAuditWorkspace(subArgs, stdout, stderr)
 	case "generate-policy":
 		return cmdGeneratePolicy(subArgs, stdout, stderr)
+	case "proxy":
+		return cmdProxy(subArgs, stdout, stderr)
 	case "mcp":
 		if err := mcp.ServeStreams(stdin, stdout); err != nil {
 			fmt.Fprintf(stderr, "error: mcp server failed: %v\n", err)
@@ -72,11 +78,12 @@ Commands:
   audit-headers    Audit HTTP headers from --file or read-only SSRF-safe --url (WEB-001..104)
   audit-csp        Audit Content-Security-Policy from --policy-string or --file (WEB-003, WEB-006)
   audit-config     Audit Nginx/Caddy/Vercel/Ingress reverse-proxy configs statically (WEB-201..207)
-  inspect-request  Defensively inspect payload across 10 attack classes with anomaly scoring (WEB-301..310)
+  inspect-request  Defensively inspect payload across 10 classes + semantic + custom YAML rules (WEB-301..311)
   audit-workspace  Recursively audit repository web configs and header dumps
   generate-policy  Generate hardened nginx, caddy, nextjs, or HTTP header snippets
-  rules            List all 28 detection rules mapped to OWASP ASVS and MITRE D3FEND
-  mcp              Start stdio JSON-RPC 2.0 MCP server (7 tools)
+  proxy            Start standalone reverse-proxy sidecar with WAF, rate limiter, SIEM logs, and /metrics
+  rules            List all 30 detection rules mapped to OWASP ASVS and MITRE D3FEND
+  mcp              Start stdio JSON-RPC 2.0 MCP server (8 tools)
   version          Print version and Raksa schema contract
 `, schema.Version)
 }
@@ -235,6 +242,7 @@ func cmdInspectRequest(args []string, stdout, stderr io.Writer) int {
 	filePath := fs.String("file", "", "Path to saved payload file to inspect")
 	paranoia := fs.Int("paranoia", 1, "WAF paranoia level (1-3)")
 	anomalyThreshold := fs.Int("anomaly-threshold", 0, "Minimum anomaly score threshold required to report/breach (0 = immediate match)")
+	customRulesPath := fs.String("custom-rules", "", "Optional custom enterprise YAML WAF rules file")
 	formatStr, failOnStr, polStr, outStr := parseReportFlags(fs)
 	if done, code := parseArgsWithHelp(fs, args); done {
 		return code
@@ -256,24 +264,174 @@ func cmdInspectRequest(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	opts := auditor.InspectOptions{
-		ParanoiaLevel:    *paranoia,
-		AnomalyThreshold: *anomalyThreshold,
+	var customSet *rules.CompiledRuleSet
+	if strings.TrimSpace(*customRulesPath) != "" {
+		var loadErr error
+		customSet, loadErr = rules.LoadCustomRules(*customRulesPath)
+		if loadErr != nil {
+			fmt.Fprintf(stderr, "error: %v\n", loadErr)
+			return 1
+		}
 	}
 
-	var findings []schema.Finding
-	var err error
+	rawPayload := *inputStr
+	target := "inline://request"
 	if hasFile {
-		findings, err = auditor.InspectPayloadFileWithOptions(*filePath, opts)
-	} else {
-		findings, err = auditor.InspectPayloadWithOptions(*inputStr, "inline://request", opts)
+		rawBytes, readErr := readBoundedPayloadFile(*filePath)
+		if readErr != nil {
+			fmt.Fprintf(stderr, "error: %v\n", readErr)
+			return 1
+		}
+		rawPayload = string(rawBytes)
+		target = "file://" + strings.ReplaceAll(*filePath, `\`, "/")
 	}
+
+	findings, err := auditor.InspectPayloadWithOptions(rawPayload, target, auditor.InspectOptions{
+		ParanoiaLevel:    *paranoia,
+		AnomalyThreshold: 0,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
+	if customSet != nil {
+		customFindings, _, _ := customSet.Evaluate(rawPayload, "all", target)
+		findings = append(findings, customFindings...)
+	}
+
+	if *anomalyThreshold > 0 && len(findings) > 0 {
+		total := 0
+		for _, f := range findings {
+			if f.Evidence != nil {
+				if w, ok := f.Evidence["anomaly_score"].(int); ok {
+					total += w
+					continue
+				}
+			}
+			total += 4
+		}
+		if total < *anomalyThreshold {
+			findings = nil
+		}
+	}
+
 	return emitReport(findings, *formatStr, *failOnStr, *polStr, *outStr, stdout, stderr)
+}
+
+func readBoundedPayloadFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat payload %q: %w", path, err)
+	}
+	if info.Size() > auditor.MaxConfigBytes {
+		return nil, fmt.Errorf("file %q exceeds %d byte limit", path, auditor.MaxConfigBytes)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open payload %q: %w", path, err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, auditor.MaxConfigBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read payload %q: %w", path, err)
+	}
+	if len(raw) > auditor.MaxConfigBytes {
+		return nil, fmt.Errorf("file %q exceeds %d byte limit", path, auditor.MaxConfigBytes)
+	}
+	return raw, nil
+}
+
+func cmdProxy(args []string, _ io.Writer, stderr io.Writer) int {
+	fs := newFlagSet("proxy", stderr)
+	listenAddr := fs.String("listen", ":8443", "Listen address for reverse-proxy sidecar")
+	upstreamURL := fs.String("upstream", "", "Upstream application base URL (http://... or https://...)")
+	mode := fs.String("mode", "enforce", "Proxy WAF mode: enforce or monitor")
+	profile := fs.String("profile", "strict", "Response security headers profile: strict or balanced")
+	paranoia := fs.Int("paranoia", 1, "WAF paranoia level (1-3)")
+	anomalyThreshold := fs.Int("anomaly-threshold", 0, "Minimum anomaly score required to alert/block (0 = immediate)")
+	rateLimit := fs.Int("rate-limit", 120, "Max requests per client IP per window (0 disables rate limiting)")
+	rateWindowStr := fs.String("rate-window", "60s", "Rate limiter fixed window duration (e.g. 60s, 1m)")
+	maxBodyBytes := fs.Int64("max-body-bytes", proxy.DefaultMaxBodyBytes, "Maximum inspected request body size in bytes")
+	customRulesPath := fs.String("custom-rules", "", "Optional custom enterprise YAML WAF rules file")
+	excludePathsStr := fs.String("exclude-paths", "", "Comma-separated URL path prefixes to exempt from inspection (/healthz always exempted)")
+	logFile := fs.String("log-file", "", "Optional NDJSON SIEM telemetry output path (defaults to stderr)")
+	metricsAddr := fs.String("metrics-addr", "", "Optional HTTP listen address exposing /metrics (Prometheus) and /healthz")
+
+	if done, code := parseArgsWithHelp(fs, args); done {
+		return code
+	}
+
+	if strings.TrimSpace(*upstreamURL) == "" {
+		fmt.Fprintln(stderr, "error: --upstream is required (e.g. --upstream http://127.0.0.1:8080)")
+		return 1
+	}
+
+	rateWindow, err := time.ParseDuration(strings.TrimSpace(*rateWindowStr))
+	if err != nil || rateWindow <= 0 {
+		fmt.Fprintf(stderr, "error: invalid --rate-window %q\n", *rateWindowStr)
+		return 1
+	}
+
+	var customSet *rules.CompiledRuleSet
+	if strings.TrimSpace(*customRulesPath) != "" {
+		customSet, err = rules.LoadCustomRules(*customRulesPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+	}
+
+	var excludePaths []string
+	for _, p := range strings.Split(*excludePathsStr, ",") {
+		clean := strings.TrimSpace(p)
+		if clean != "" {
+			excludePaths = append(excludePaths, clean)
+		}
+	}
+
+	var telemWriter io.Writer = stderr
+	if strings.TrimSpace(*logFile) != "" {
+		if parent := filepath.Dir(*logFile); parent != "." && parent != "" {
+			if mkErr := os.MkdirAll(parent, 0o755); mkErr != nil {
+				fmt.Fprintf(stderr, "error: create log directory: %v\n", mkErr)
+				return 1
+			}
+		}
+		f, openErr := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if openErr != nil {
+			fmt.Fprintf(stderr, "error: open telemetry log %q: %v\n", *logFile, openErr)
+			return 1
+		}
+		defer f.Close()
+		telemWriter = f
+	}
+
+	cfg := proxy.Config{
+		ListenAddr:       *listenAddr,
+		UpstreamURL:      *upstreamURL,
+		Mode:             *mode,
+		Profile:          *profile,
+		ParanoiaLevel:    *paranoia,
+		AnomalyThreshold: *anomalyThreshold,
+		RateLimit:        *rateLimit,
+		RateWindow:       rateWindow,
+		MaxBodyBytes:     *maxBodyBytes,
+		CustomRules:      customSet,
+		ExcludePaths:     excludePaths,
+		MetricsAddr:      *metricsAddr,
+		TelemetryWriter:  telemWriter,
+	}
+
+	fmt.Fprintf(stderr, "raksa-webshield proxy v%s listening on %s -> %s (mode=%s, profile=%s)\n", schema.Version, cfg.ListenAddr, cfg.UpstreamURL, cfg.Mode, cfg.Profile)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := proxy.RunServer(ctx, cfg); err != nil {
+		fmt.Fprintf(stderr, "error: proxy server stopped: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func cmdGeneratePolicy(args []string, stdout, stderr io.Writer) int {
