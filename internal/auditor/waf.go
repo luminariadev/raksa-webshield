@@ -290,19 +290,52 @@ func InspectPayloadWithOptions(input string, target string, opts InspectOptions)
 	for i := range wafChecks {
 		chk := &wafChecks[i]
 		matched := matchAnyViewPrefiltered(views, lowViews, chk, paranoia)
+		detector := "regex"
+		semanticTag := ""
+
+		if matched == "" && chk.ruleID == "WEB-301" {
+			for _, v := range views {
+				if vec, smp, ok := AnalyzeXSSSemantic(v); ok {
+					matched = smp
+					detector = "semantic"
+					semanticTag = vec
+					break
+				}
+			}
+		}
+		if matched == "" && chk.ruleID == "WEB-302" {
+			for _, v := range views {
+				if fp, smp, ok := AnalyzeSQLiSemantic(v); ok {
+					matched = smp
+					detector = "semantic"
+					semanticTag = fp
+					break
+				}
+			}
+		}
+
 		if matched != "" {
 			totalScore += chk.weight
+			ev := map[string]any{
+				"matched_sample": truncateSample(matched, 80),
+				"detector":       detector,
+				"anomaly_score":  chk.weight,
+				"paranoia_level": paranoia,
+				"owasp_asvs":     chk.asvs,
+			}
+			if semanticTag != "" {
+				if chk.ruleID == "WEB-302" {
+					ev["sql_fingerprint"] = semanticTag
+				} else {
+					ev["xss_vector"] = semanticTag
+				}
+			}
 			findings = append(findings, newFinding(
 				chk.ruleID, "waf", chk.severity,
 				chk.title,
 				chk.description,
 				target,
-				map[string]any{
-					"matched_sample": truncateSample(matched, 80),
-					"anomaly_score":  chk.weight,
-					"paranoia_level": paranoia,
-					"owasp_asvs":     chk.asvs,
-				},
+				ev,
 				chk.remediation,
 				chk.d3fend,
 				chk.idSuffix,

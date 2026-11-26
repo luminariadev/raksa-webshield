@@ -329,3 +329,61 @@ func TestV2AdvancedWAFLayersAnomalyScoringAndSelfAuditRemediation(t *testing.T) 
 		t.Fatalf("expected unsafe wildcard origin to be rejected")
 	}
 }
+
+func TestV3SemanticSQLiAndXSSTokenizersAndZeroFalsePositives(t *testing.T) {
+	sqliVectors := []string{
+		`1' AND 2>1--`,
+		`admin'/**/OR/**/'a'='a`,
+		`1) UNION ALL SELECT NULL,NULL--`,
+		`1' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--`,
+		`1' AND BENCHMARK(5000000,MD5(1))--`,
+		`1' AND PG_SLEEP(5)--`,
+		`1' ORDER BY 10--`,
+		`1; EXEC xp_cmdshell`,
+		`1' OR 1 IN (SELECT 1)--`,
+	}
+	for _, vec := range sqliVectors {
+		findings, err := InspectPayload(vec, "inline://sqli")
+		if err != nil {
+			t.Fatalf("InspectPayload(%q): %v", vec, err)
+		}
+		if !ruleSet(findings)["WEB-302"] {
+			t.Fatalf("expected WEB-302 SQLi detection for %q, got %+v", vec, findings)
+		}
+	}
+
+	xssVectors := []string{
+		`<img/src=x/onerror=alert(1)>`,
+		`<details open ontoggle=alert(1)>`,
+		`<body/onload=alert(1)>`,
+		`<a href="java&#x09;script:alert(1)">tap</a>`,
+		`<meta http-equiv="refresh" content="0;url=javascript:alert(1)">`,
+		`<form action="javascript:alert(1)"><input type="submit"></form>`,
+	}
+	for _, vec := range xssVectors {
+		findings, err := InspectPayload(vec, "inline://xss")
+		if err != nil {
+			t.Fatalf("InspectPayload(%q): %v", vec, err)
+		}
+		if !ruleSet(findings)["WEB-301"] {
+			t.Fatalf("expected WEB-301 XSS detection for %q, got %+v", vec, findings)
+		}
+	}
+
+	benignProse := []string{
+		`{"comment":"Hello world 1+1=2","path":"/docs/security","author":"alice"}`,
+		`Please select a book from our catalog and order by popularity`,
+		`It's false and alice or bob agreed 1+1=2`,
+		`Please use SELECT item_id FROM menu style descriptions in prose only.`,
+		`<p>Comparison: x &lt; y is valid in math class.</p>`,
+	}
+	for _, text := range benignProse {
+		findings, err := InspectPayload(text, "inline://benign")
+		if err != nil {
+			t.Fatalf("InspectPayload(%q): %v", text, err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("unexpected false positive on benign prose %q: %+v", text, findings)
+		}
+	}
+}
