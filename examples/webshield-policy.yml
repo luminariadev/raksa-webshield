@@ -1,0 +1,10 @@
+# Example raksa-webshield suppression policy
+# Usage: raksa-webshield audit-headers --file headers.http --policy examples/webshield-policy.yml --fail-on high
+
+min_severity: low
+
+suppressions:
+  - rule_id: WEB-005
+    target_contains: staging.example
+    reason: CDN edge worker injects Permissions-Policy in production only
+    expires_on: "2027-06-30"
