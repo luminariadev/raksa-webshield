@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  prepare:
+    name: Resolve and Validate Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Validate tag format
+        id: resolve
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Error: invalid semver release tag '$TAG' (expected vX.Y.Z)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Setup Go 1.26
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: Build and package binary archive
+        shell: bash
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          VER="${TAG#v}"
+          NAME="raksa-webshield-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "stage/${NAME}" dist
+          CGO_ENABLED=0 GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" go build \
+            -trimpath \
+            -ldflags="-s -w -X github.com/luminariadev/raksa-webshield/internal/schema.Version=${VER}" \
+            -o "stage/${NAME}/raksa-webshield${{ matrix.ext }}" \
+            ./cmd/raksa-webshield
+          cp LICENSE README.md "stage/${NAME}/"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd stage && zip -r "../dist/${NAME}.zip" "${NAME}")
+          else
+            tar -C stage -czf "dist/${NAME}.tar.gz" "${NAME}"
+          fi
+
+      - name: Upload target artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate SHA256SUMS and extract CHANGELOG notes
+        shell: bash
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          VERSION="${TAG#v}"
+          (cd dist && sha256sum raksa-webshield-* > SHA256SUMS.txt)
+
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            /^## \[/ && flag { exit }
+            flag { print }
+          ' CHANGELOG.md > release_notes.md
+
+          if [ ! -s release_notes.md ]; then
+            echo "Release ${TAG}" > release_notes.md
+          fi
+
+      - name: Create or update GitHub Release with retry backoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          created=false
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            created=true
+          else
+            for attempt in 1 2 3; do
+              if gh release create "$TAG" --title "$TAG" --notes-file release_notes.md; then
+                created=true
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+          fi
+
+          if [ "$created" != "true" ]; then
+            echo "Failed to create or locate release $TAG after retries"
+            exit 1
+          fi
+
+          uploaded=false
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG" dist/* --clobber; then
+              uploaded=true
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+
+          if [ "$uploaded" != "true" ]; then
+            echo "Failed to upload release assets after retries"
+            exit 1
+          fi
