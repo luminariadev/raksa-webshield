@@ -1,0 +1,9 @@
+min_severity: low
+suppressions:
+  - rule_id: WEB-005
+    target_contains: headers_insecure.http
+    reason: Edge proxy injects Permissions-Policy downstream
+    expires_on: "2028-12-31"
+  - rule_id: WEB-001
+    reason: Expired TLS rollout waiver
+    expires_on: "2026-01-01"

@@ -1,0 +1,7 @@
+{
+  "comment": "<img src=x onerror=alert(1)>",
+  "query": "' OR '1'='1' UNION SELECT username,password FROM users; DROP TABLE audit;--",
+  "template": "../../../../etc/passwd%00",
+  "merge": { "__proto__": { "isAdmin": true } },
+  "webhook": "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+}
