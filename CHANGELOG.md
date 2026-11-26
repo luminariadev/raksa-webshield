@@ -5,6 +5,29 @@ All notable changes to `raksa-webshield` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-26
+
+### Added
+- **Security Posture Scoring (`WEB-*` Schema v1 Additive Extension)**: Added `posture` (`score` `0-100`, `grade` `A+`..`F`) to `Report` and rendered `score: X/100 (Grade)` directly in CLI table headers.
+- **CSP Evaluator Pro & Modern Isolation Headers (`WEB-006`, `WEB-007`)**:
+  - Added `script-src-elem` fallback chain, `blob:` / `filesystem:` detection, CSP Level 3 `'nonce-...'` / hash `'strict-dynamic'` awareness (zero false positive on backward-compatible `'unsafe-inline'`), JSONP/CDN bypass host database (`ajax.googleapis.com`, `cdnjs.cloudflare.com`, `cdn.jsdelivr.net`, `unpkg.com`, etc.), and missing `form-action` detection.
+  - Added `Cross-Origin-Opener-Policy` (COOP), `Cross-Origin-Resource-Policy` (CORP), and authenticated `Set-Cookie` `Cache-Control: no-store` checks, plus smart classification of CSRF/preference cookies (`XSRF-TOKEN`, `csrf-token`) while keeping `Secure` mandatory.
+  - Added live HTTPS TLS protocol and leaf certificate expiration (`<= 14d`) checks in `FetchAndAuditURL`.
+- **Block-Aware Nginx AST, Caddyfile, and Modern Edge Config Auditors (`WEB-205`..`WEB-207`)**:
+  - Upgraded `config.go` with Nginx scope stack tracking to detect `location` `add_header` parent security header cancellation (`WEB-205`), off-by-slash `alias` path traversal and dynamic `proxy_pass` / `$http_host` forwarding (`WEB-206`), and weak OpenSSL/Caddy `ssl_ciphers` ignoring `!`-prefixed exclusions (`WEB-207`).
+  - Added real Caddyfile, `vercel.json`, `_headers`, and Kubernetes Ingress YAML auditing.
+- **10-Class Anomaly-Scoring WAF Engine (`WEB-306`..`WEB-310`)**:
+  - Added Command Injection / RCE (`WEB-306`), SSTI / JNDI (`WEB-307`), NoSQL operator injection (`WEB-308`), XXE (`WEB-309`), and CRLF header splitting (`WEB-310`), plus `--paranoia` (`1-3`) and `--anomaly-threshold`.
+  - Added multi-layer URI + HTML entity + `\u00XX` + SQL `/**/` comment normalization and ASCII fast-path prefilters.
+- **Auto-Remediation Generator & 7th MCP Tool**:
+  - Added `raksa-webshield generate-policy --target nginx|caddy|nextjs|headers` and MCP tool `webshield_generate_remediation` emitting `100/100 A+` hardened snippets verified cleanly against `raksa-webshield` itself.
+- **TypeScript SDK `@raksa/webshield` `0.2.0` (Zero Runtime Deps)**:
+  - Added Web Standard Fetch API wrapper (`createFetchWebShield` for Next.js, Hono, Workers, Bun, Deno), per-request WebCrypto CSP nonce helper (`generateCspNonce`), bounded-LRU in-memory rate limiter (`createMemoryRateLimiter` emitting HTTP `429` + `Retry-After`), tag-stack balanced & idempotent `sanitizeHtml`, 3-pass `isSafeUrl`, deep JSON + request header inspection, and 10-class WAF parity.
+
+### Security & Performance
+- **Opaque HTTP 403 Responses by Default**: Middleware and Fetch wrapper now return `{ error, incident_id }` to clients by default so internal `rule_id` and `matched_sample` telemetry stay restricted to `onReport` callbacks (`exposeReportInResponse: true` overrides explicitly).
+- **20x Go WAF Speedup**: Package-level rule compilation and ASCII prefilters cut `BenchmarkInspectPayload-12` from `51,969 ns/op` (~19.2k ops/s, 5 rules) in `v0.1.0` to `2,538 ns/op` (~394k ops/s, 10 rules) in `v0.2.0`.
+
 ## [0.1.0] - 2026-11-26
 
 ### Added

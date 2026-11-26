@@ -86,6 +86,8 @@ jobs:
           CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/raksa-webshield ./cmd/raksa-webshield
           ./bin/raksa-webshield version
           ./bin/raksa-webshield rules --format json > rules.json
+          ./bin/raksa-webshield generate-policy --target nginx --profile strict > generated.nginx.conf
+          ./bin/raksa-webshield audit-config --path generated.nginx.conf --fail-on low
           ./bin/raksa-webshield audit-headers --file testdata/headers_hardened.http --fail-on low
           ./bin/raksa-webshield audit-config --path testdata/nginx_hardened.conf --fail-on low
           ./bin/raksa-webshield inspect-request --file testdata/payload_benign.json --fail-on low
@@ -93,12 +95,21 @@ jobs:
           set +e
           ./bin/raksa-webshield audit-headers --file testdata/headers_insecure.http --format sarif --fail-on critical > web.sarif
           hdr_rc=$?
+          ./bin/raksa-webshield audit-config --path testdata/nginx_gixy_bugs.conf --fail-on high
+          gixy_rc=$?
+          ./bin/raksa-webshield audit-config --path testdata/Caddyfile --fail-on high
+          caddy_rc=$?
           ./bin/raksa-webshield inspect-request --file testdata/payload_malicious.json --fail-on critical
           waf_rc=$?
+          ./bin/raksa-webshield inspect-request --file testdata/payload_advanced.json --fail-on critical
+          adv_rc=$?
           set -e
 
           test "$hdr_rc" -eq 2
+          test "$gixy_rc" -eq 2
+          test "$caddy_rc" -eq 2
           test "$waf_rc" -eq 2
+          test "$adv_rc" -eq 2
 
       - name: Build and smoke-test distroless Docker image
         run: |

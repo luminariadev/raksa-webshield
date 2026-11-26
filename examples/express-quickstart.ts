@@ -7,8 +7,12 @@ import {
 
 const shield = createWebShieldMiddleware({
   mode: "enforce",
-  onReport(report: RaksaReport) {
-    console.warn("blocked web request:", JSON.stringify(report));
+  cspNonce: true,
+  anomalyThreshold: 4,
+  excludePaths: ["/healthz"],
+  rateLimit: { windowMs: 60_000, maxRequests: 120 },
+  onReport(report: RaksaReport, _req, incidentId: string) {
+    console.warn("blocked web request:", incidentId, JSON.stringify(report));
   },
 });
 
